@@ -123,7 +123,10 @@
     }
   },
   "scripts": {
-    "lint": "node --check src/extension.js"
+    "lint": "node --check src/extension.js && node --check src/git-utils.js && node --check test/git-utils.test.js",
+    "test": "node --test test/*.test.js",
+    "check": "npm run lint && npm test",
+    "package:vsix": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-vsix.ps1"
   },
   "devDependencies": {}
 }
