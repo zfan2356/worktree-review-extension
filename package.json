@@ -1,0 +1,129 @@
+{
+  "name": "worktree-review",
+  "displayName": "Worktree Review",
+  "description": "Review Git worktree branches from your current repository without switching branches.",
+  "version": "0.0.1",
+  "publisher": "zfan2356",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./src/extension.js",
+  "activationEvents": [
+    "onView:worktreeReview.worktrees",
+    "onCommand:worktreeReview.refresh",
+    "onCommand:worktreeReview.selectBaseRef",
+    "onCommand:worktreeReview.openDiff",
+    "onCommand:worktreeReview.openWorktreeFile",
+    "onCommand:worktreeReview.copyWorktreePath"
+  ],
+  "contributes": {
+    "configuration": {
+      "title": "Worktree Review",
+      "properties": {
+        "worktreeReview.gitPath": {
+          "type": "string",
+          "default": "git",
+          "description": "Path to the Git executable."
+        },
+        "worktreeReview.includeCurrentWorktree": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show the current workspace worktree in the review list."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "worktreeReview.refresh",
+        "title": "Refresh",
+        "category": "Worktree Review",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "worktreeReview.selectBaseRef",
+        "title": "Select Base Ref",
+        "category": "Worktree Review",
+        "icon": "$(git-branch)"
+      },
+      {
+        "command": "worktreeReview.openDiff",
+        "title": "Open Diff",
+        "category": "Worktree Review",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "worktreeReview.openWorktreeFile",
+        "title": "Open Worktree File",
+        "category": "Worktree Review",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "worktreeReview.copyWorktreePath",
+        "title": "Copy Worktree Path",
+        "category": "Worktree Review",
+        "icon": "$(copy)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "worktreeReview",
+          "title": "Worktree Review",
+          "icon": "resources/worktree-review.svg"
+        }
+      ]
+    },
+    "views": {
+      "worktreeReview": [
+        {
+          "id": "worktreeReview.worktrees",
+          "name": "Worktrees"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "worktreeReview.refresh",
+          "when": "view == worktreeReview.worktrees",
+          "group": "navigation"
+        },
+        {
+          "command": "worktreeReview.selectBaseRef",
+          "when": "view == worktreeReview.worktrees",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "worktreeReview.selectBaseRef",
+          "when": "view == worktreeReview.worktrees && viewItem == repo",
+          "group": "navigation"
+        },
+        {
+          "command": "worktreeReview.openDiff",
+          "when": "view == worktreeReview.worktrees && viewItem == changedFile",
+          "group": "inline"
+        },
+        {
+          "command": "worktreeReview.openWorktreeFile",
+          "when": "view == worktreeReview.worktrees && viewItem == changedFile",
+          "group": "navigation"
+        },
+        {
+          "command": "worktreeReview.copyWorktreePath",
+          "when": "view == worktreeReview.worktrees && viewItem == worktree",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "lint": "node --check src/extension.js"
+  },
+  "devDependencies": {}
+}
