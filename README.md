@@ -34,6 +34,16 @@ npm run lint
 
 The extension shells out to Git. If Git is not on `PATH`, set `worktreeReview.gitPath` in VS Code settings.
 
+## Manual testing fixture
+
+Generate a local repository with several linked worktrees:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/create-review-fixture.ps1
+```
+
+The script prints the generated fixture root and the main repository path. Open the main repository path in VS Code, then use the Worktree Review activity bar item.
+
 ## Design notes
 
 The first review mode uses VS Code's native diff editor, which is the most stable way to get a local PR-like file review flow.
