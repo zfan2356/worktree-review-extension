@@ -1,4 +1,4 @@
-"use strict";
+﻿"use strict";
 
 const cp = require("child_process");
 const fs = require("fs");
@@ -10,6 +10,7 @@ const {
   mergeFileStatuses,
   normalizeFsPath,
   parseNameStatus,
+  parsePreviewLineChanges,
   parseUntrackedFiles,
   parseWorktreeList,
   relativePathFromRoot,
@@ -43,12 +44,14 @@ function activate(context) {
   const git = new Git();
   const provider = new WorktreeReviewProvider(git, context);
   const decorations = new ExplorerDecorationProvider(provider);
+  const previewDecorations = createPreviewDecorations(context);
   const statusBar = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Left,
     100
   );
 
   provider.setDecorationProvider(decorations);
+  provider.setPreviewDecorations(previewDecorations);
   provider.setStatusBar(statusBar);
 
   context.subscriptions.push(
@@ -62,6 +65,7 @@ function activate(context) {
       showCollapseAll: false,
     }),
     statusBar,
+    ...Object.values(previewDecorations),
     vscode.window.onDidChangeActiveTextEditor((editor) =>
       provider.handleActiveEditor(editor)
     ),
@@ -172,6 +176,10 @@ class WorktreeReviewProvider {
 
   setDecorationProvider(provider) {
     this.decorationProvider = provider;
+  }
+
+  setPreviewDecorations(decorations) {
+    this.previewDecorations = decorations;
   }
 
   setStatusBar(statusBar) {
@@ -384,6 +392,10 @@ class WorktreeReviewProvider {
     this.mode = mode;
     await this.context.workspaceState.update(MODE_KEY, mode);
     this._onDidChangeTreeData.fire();
+    this.decorationProvider && this.decorationProvider.refresh();
+    if (this.mode !== "preview") {
+      this.clearPreviewDecorations(vscode.window.activeTextEditor);
+    }
     this.updateStatusBar();
   }
 
@@ -565,12 +577,22 @@ class WorktreeReviewProvider {
   }
 
   async handleActiveEditor(editor) {
-    if (!editor || this.mode === "off" || this.openingReview) {
+    if (!editor) {
       return;
     }
 
     const document = editor.document;
     if (!document || document.uri.scheme !== "file") {
+      return;
+    }
+
+    if (this.mode === "preview" && this.applyPreviewDecorationsForEditor(editor)) {
+      return;
+    }
+
+    this.clearPreviewDecorations(editor);
+
+    if (this.mode === "off" || this.openingReview) {
       return;
     }
 
@@ -675,8 +697,71 @@ class WorktreeReviewProvider {
       return true;
     }
 
-    await vscode.window.showTextDocument(uri, { preview: false });
+    const editor = await vscode.window.showTextDocument(uri, { preview: false });
+    await this.applyPreviewDecorations(editor, worktree, file);
     return true;
+  }
+
+  applyPreviewDecorationsForEditor(editor) {
+    const target = this.findPreviewTargetForUri(editor.document.uri);
+    if (!target) {
+      return false;
+    }
+
+    this.applyPreviewDecorations(editor, target.worktree, target.file);
+    return true;
+  }
+
+  async applyPreviewDecorations(editor, worktree, file) {
+    if (!this.previewDecorations || editor.document.uri.scheme !== "file") {
+      return;
+    }
+
+    const lineChanges = await this.getPreviewLineChanges(editor.document, worktree, file);
+    const added = rangesFromLineSpans(editor.document, lineChanges.added);
+    const modified = rangesFromLineSpans(editor.document, lineChanges.modified);
+    const deleted = deletionOptionsFromLineChanges(editor.document, lineChanges.deleted);
+
+    editor.setDecorations(this.previewDecorations.added, added);
+    editor.setDecorations(this.previewDecorations.modified, modified);
+    editor.setDecorations(this.previewDecorations.deleted, deleted);
+  }
+
+  clearPreviewDecorations(editor) {
+    if (!editor || !this.previewDecorations) {
+      return;
+    }
+
+    editor.setDecorations(this.previewDecorations.added, []);
+    editor.setDecorations(this.previewDecorations.modified, []);
+    editor.setDecorations(this.previewDecorations.deleted, []);
+  }
+
+  async getPreviewLineChanges(document, worktree, file) {
+    if (file.statusKind === "A") {
+      return {
+        added: [{ start: 1, count: Math.max(1, document.lineCount) }],
+        modified: [],
+        deleted: [],
+      };
+    }
+
+    const diffPaths = file.oldPath ? [file.oldPath, file.path] : [file.path];
+    const output = await this.git.run(
+      worktree.path,
+      [
+        "diff",
+        "--unified=0",
+        "--no-ext-diff",
+        "--no-color",
+        file.compareBaseRef,
+        "--",
+        ...diffPaths,
+      ],
+      { trim: false }
+    );
+
+    return parsePreviewLineChanges(output);
   }
 
   async openDiffForFile(worktree, file) {
@@ -745,6 +830,28 @@ class WorktreeReviewProvider {
     return undefined;
   }
 
+  findPreviewTargetForUri(uri) {
+    for (const state of this.changeStates.values()) {
+      const relativePath = relativePathFromRoot(state.worktree.path, uri.fsPath);
+      if (!relativePath) {
+        continue;
+      }
+
+      const file = state.index.byPath.get(relativePath);
+      if (file && file.statusKind !== "D") {
+        return {
+          state,
+          repo: state.repo,
+          worktree: state.worktree,
+          relativePath,
+          file,
+        };
+      }
+    }
+
+    return undefined;
+  }
+
   async copyWorktreePath(node) {
     if (!node || node.kind !== "worktree") {
       return;
@@ -764,9 +871,9 @@ class WorktreeReviewProvider {
     if (this.mode === "off") {
       this.statusBar.text = "$(circle-slash) WTR: Off";
     } else if (firstState) {
-      this.statusBar.text = `$(git-branch) WTR: ${firstState.worktree.label} · ${MODES[this.mode].label}`;
+      this.statusBar.text = `$(git-branch) WTR: ${firstState.worktree.label} | ${MODES[this.mode].label}`;
     } else {
-      this.statusBar.text = `$(git-branch) WTR: Select worktree · ${MODES[this.mode].label}`;
+      this.statusBar.text = `$(git-branch) WTR: Select worktree | ${MODES[this.mode].label}`;
     }
 
     this.statusBar.tooltip =
@@ -793,7 +900,7 @@ class RepoNode {
       vscode.TreeItemCollapsibleState.Expanded
     );
     const target = this.activeWorktree ? this.activeWorktree.label : "none";
-    item.description = `base: ${this.baseRef} · target: ${target} · ${MODES[this.mode].label}`;
+    item.description = `base: ${this.baseRef} | target: ${target} | ${MODES[this.mode].label}`;
     item.tooltip = `${this.repoRoot}\nCurrent: ${this.currentRef}\nBase: ${this.baseRef}\nTarget: ${target}`;
     item.contextValue = "repo";
     item.iconPath = new vscode.ThemeIcon("repo");
@@ -860,7 +967,7 @@ class WorktreeNode {
       }
     }
 
-    item.description = details.join(" · ") || undefined;
+    item.description = details.join(" | ") || undefined;
     item.tooltip = `${this.path}\nHEAD: ${this.head || "unknown"}\nCompare: ${this.repo.baseRef}...${this.headRef}`;
     item.contextValue = this.active ? "worktreeActive" : "worktree";
     item.iconPath = new vscode.ThemeIcon(this.active ? "pass-filled" : "git-branch");
@@ -885,6 +992,70 @@ class MessageNode {
     item.iconPath = new vscode.ThemeIcon("info");
     return item;
   }
+}
+
+function createPreviewDecorations(context) {
+  return {
+    added: vscode.window.createTextEditorDecorationType({
+      isWholeLine: true,
+      borderWidth: "0 0 0 3px",
+      borderStyle: "solid",
+      borderColor: new vscode.ThemeColor("gitDecoration.addedResourceForeground"),
+      overviewRulerColor: new vscode.ThemeColor("gitDecoration.addedResourceForeground"),
+      overviewRulerLane: vscode.OverviewRulerLane.Left,
+    }),
+    modified: vscode.window.createTextEditorDecorationType({
+      isWholeLine: true,
+      borderWidth: "0 0 0 3px",
+      borderStyle: "solid",
+      borderColor: new vscode.ThemeColor("gitDecoration.modifiedResourceForeground"),
+      overviewRulerColor: new vscode.ThemeColor("gitDecoration.modifiedResourceForeground"),
+      overviewRulerLane: vscode.OverviewRulerLane.Left,
+    }),
+    deleted: vscode.window.createTextEditorDecorationType({
+      gutterIconPath: vscode.Uri.file(
+        context.asAbsolutePath(path.join("resources", "deleted-triangle.svg"))
+      ),
+      gutterIconSize: "contain",
+      overviewRulerColor: new vscode.ThemeColor("gitDecoration.deletedResourceForeground"),
+      overviewRulerLane: vscode.OverviewRulerLane.Left,
+    }),
+  };
+}
+
+function rangesFromLineSpans(document, spans) {
+  const ranges = [];
+  for (const span of spans) {
+    const start = clampLine(document, span.start);
+    const end = clampLine(document, span.start + Math.max(1, span.count) - 1);
+    ranges.push(new vscode.Range(start, 0, end, 0));
+  }
+
+  return ranges;
+}
+
+function deletionOptionsFromLineChanges(document, deletions) {
+  return deletions.map((deletion) => {
+    const line = clampLine(document, deletion.line);
+    const deletedText =
+      deletion.lines && deletion.lines.length > 0
+        ? deletion.lines.join("\n")
+        : `${deletion.oldCount} deleted line(s)`;
+    return {
+      range: new vscode.Range(line, 0, line, 0),
+      hoverMessage: new vscode.MarkdownString(
+        `Deleted from base at line ${deletion.oldStart}:\n\n\`\`\`\n${deletedText}\n\`\`\``
+      ),
+    };
+  });
+}
+
+function clampLine(document, oneBasedLine) {
+  if (document.lineCount <= 0) {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(document.lineCount - 1, oneBasedLine - 1));
 }
 
 function formatStats(stats) {
@@ -919,3 +1090,4 @@ module.exports = {
   activate,
   deactivate,
 };
+

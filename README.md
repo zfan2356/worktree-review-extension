@@ -14,6 +14,10 @@ It is built for parallel AI-agent workflows where each agent owns a Git worktree
   - left side: base ref content
   - right side: the selected worktree file when it exists
 - Opens the selected worktree's real file when you open a changed Explorer file in Preview mode.
+- Marks Preview-mode changes with editor decorations:
+  - green left border for added lines
+  - blue left border for modified lines
+  - red gutter marker for deleted blocks
 - Includes uncommitted worktree edits in the right-side review view.
 - Provides an `Open Changed File` picker for added/untracked files that do not exist in the base Explorer tree.
 

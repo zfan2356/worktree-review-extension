@@ -138,6 +138,75 @@ function buildChangeIndex(files) {
   };
 }
 
+function parsePreviewLineChanges(diffOutput) {
+  const added = [];
+  const modified = [];
+  const deleted = [];
+  const lines = diffOutput.split(/\r?\n/);
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const header = parseHunkHeader(lines[index]);
+    if (!header) {
+      continue;
+    }
+
+    const body = [];
+    index += 1;
+    while (index < lines.length && !lines[index].startsWith("@@ ")) {
+      body.push(lines[index]);
+      index += 1;
+    }
+    index -= 1;
+
+    const removedLines = body
+      .filter((line) => line.startsWith("-") && !line.startsWith("---"))
+      .map((line) => line.slice(1));
+    const hasRemovedLines = removedLines.length > 0;
+
+    if (header.newCount > 0) {
+      const range = {
+        start: header.newStart,
+        count: header.newCount,
+      };
+
+      if (header.oldCount === 0) {
+        added.push(range);
+      } else {
+        modified.push(range);
+      }
+    }
+
+    if (hasRemovedLines || header.newCount === 0) {
+      deleted.push({
+        line: header.newCount > 0 ? header.newStart : Math.max(1, header.newStart),
+        oldStart: header.oldStart,
+        oldCount: header.oldCount,
+        lines: removedLines,
+      });
+    }
+  }
+
+  return {
+    added,
+    modified,
+    deleted,
+  };
+}
+
+function parseHunkHeader(line) {
+  const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
+  if (!match) {
+    return undefined;
+  }
+
+  return {
+    oldStart: Number(match[1]),
+    oldCount: match[2] === undefined ? 1 : Number(match[2]),
+    newStart: Number(match[3]),
+    newCount: match[4] === undefined ? 1 : Number(match[4]),
+  };
+}
+
 function addParentFolders(folders, filePath) {
   let current = path.posix.dirname(filePath);
   while (current && current !== ".") {
@@ -242,6 +311,7 @@ module.exports = {
   mergeFileStatuses,
   normalizeFsPath,
   parseNameStatus,
+  parsePreviewLineChanges,
   parseUntrackedFiles,
   parseWorktreeList,
   relativePathFromRoot,
