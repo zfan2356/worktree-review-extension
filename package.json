@@ -2,11 +2,17 @@
   "name": "worktree-review",
   "displayName": "Worktree Review",
   "description": "Review Git worktree branches from your current repository without switching branches.",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "zfan2356",
   "license": "MIT",
   "engines": {
     "vscode": "^1.90.0"
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true,
+      "description": "Worktree Review only reads Git metadata and opens local diff views for the current workspace."
+    }
   },
   "categories": [
     "Other"
