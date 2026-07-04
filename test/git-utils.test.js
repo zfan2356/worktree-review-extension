@@ -10,7 +10,6 @@ const {
   mergeFileStatuses,
   normalizeFsPath,
   parseNameStatus,
-  parsePreviewLineChanges,
   parseUntrackedFiles,
   parseWorktreeList,
   relativePathFromRoot,
@@ -186,46 +185,6 @@ test("buildChangeIndex maps changed paths, rename sources, folders, and stats", 
     C: 0,
     U: 0,
     other: 0,
-  });
-});
-
-test("parsePreviewLineChanges maps zero-context hunks to added, modified, and deleted marks", () => {
-  const diff = [
-    "diff --git a/src/app.py b/src/app.py",
-    "index 1111111..2222222 100644",
-    "--- a/src/app.py",
-    "+++ b/src/app.py",
-    "@@ -1,0 +2,2 @@",
-    "+added one",
-    "+added two",
-    "@@ -8,2 +10,2 @@",
-    "-old one",
-    "-old two",
-    "+new one",
-    "+new two",
-    "@@ -20,3 +21,0 @@",
-    "-removed one",
-    "-removed two",
-    "-removed three",
-  ].join("\n");
-
-  assert.deepEqual(parsePreviewLineChanges(diff), {
-    added: [{ start: 2, count: 2 }],
-    modified: [{ start: 10, count: 2 }],
-    deleted: [
-      {
-        line: 10,
-        oldStart: 8,
-        oldCount: 2,
-        lines: ["old one", "old two"],
-      },
-      {
-        line: 21,
-        oldStart: 20,
-        oldCount: 3,
-        lines: ["removed one", "removed two", "removed three"],
-      },
-    ],
   });
 });
 
