@@ -8,19 +8,28 @@ It is built for parallel AI-agent workflows where each agent owns a Git worktree
 
 - Shows Git worktrees for the current VS Code workspace repository.
 - Lets you choose a base ref, defaulting to the current branch.
-- Lists changed files for each worktree branch.
-- Opens a VS Code diff editor for a changed file:
+- Lets you choose an active worktree and review mode.
+- Decorates changed files and folders in the normal VS Code Explorer.
+- Opens a VS Code diff editor when you open a changed Explorer file in Diff mode:
   - left side: base ref content
   - right side: the selected worktree file when it exists
+- Opens the selected worktree's real file when you open a changed Explorer file in Preview mode.
 - Includes uncommitted worktree edits in the right-side review view.
-- Marks added, modified, deleted, and renamed files in the Worktree Review sidebar.
+- Provides an `Open Changed File` picker for added/untracked files that do not exist in the base Explorer tree.
 
 ## Usage
 
 1. Open your main repository in VS Code.
 2. Open the Worktree Review activity bar item.
 3. Select a base ref if the current branch is not the desired review base.
-4. Expand a worktree and click a changed file.
+4. Select the worktree you want to review.
+5. Select a mode:
+   - `Off`: normal VS Code behavior
+   - `Diff`: opening a changed Explorer file opens a base-vs-worktree diff
+   - `Preview`: opening a changed Explorer file opens the real file from the selected worktree
+6. Return to Explorer and open files from the main repository tree.
+
+Added and untracked files do not exist in the main repository tree, so open them through `Worktree Review: Open Changed File`.
 
 ## Development
 

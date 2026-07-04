@@ -5,12 +5,14 @@ const path = require("path");
 const test = require("node:test");
 
 const {
+  buildChangeIndex,
   formatError,
   mergeFileStatuses,
   normalizeFsPath,
   parseNameStatus,
   parseUntrackedFiles,
   parseWorktreeList,
+  relativePathFromRoot,
   shortSha,
   statusInfo,
   trimTrailingNewline,
@@ -157,11 +159,50 @@ test("statusInfo returns UI metadata for every supported status and defaults to 
   assert.equal(statusInfo("X").label, "modified");
 });
 
+test("buildChangeIndex maps changed paths, rename sources, folders, and stats", () => {
+  const files = [
+    { path: "src/app.js", status: "M", statusKind: "M" },
+    {
+      path: "src/new-name.js",
+      oldPath: "src/old-name.js",
+      status: "R100",
+      statusKind: "R",
+    },
+    { path: "docs/guide.md", status: "D", statusKind: "D" },
+  ];
+  const index = buildChangeIndex(files);
+
+  assert.equal(index.byPath.get("src/app.js"), files[0]);
+  assert.equal(index.byPath.get("src/new-name.js"), files[1]);
+  assert.equal(index.byOldPath.get("src/old-name.js"), files[1]);
+  assert.equal(index.folders.has("src"), true);
+  assert.equal(index.folders.has("docs"), true);
+  assert.deepEqual(index.stats, {
+    A: 0,
+    M: 1,
+    D: 1,
+    R: 1,
+    C: 0,
+    U: 0,
+    other: 0,
+  });
+});
+
 test("normalizeFsPath lowercases only on Windows", () => {
   const sample = path.join("Some", "Repo");
 
   assert.equal(normalizeFsPath(sample, "win32"), path.resolve(sample).toLowerCase());
   assert.equal(normalizeFsPath(sample, "linux"), path.resolve(sample));
+});
+
+test("relativePathFromRoot returns POSIX relative paths only inside the repo", () => {
+  const root = path.join("tmp", "repo");
+  const file = path.join(root, "src", "app.py");
+  const outside = path.join("tmp", "other", "app.py");
+
+  assert.equal(relativePathFromRoot(root, file), "src/app.py");
+  assert.equal(relativePathFromRoot(root, root), undefined);
+  assert.equal(relativePathFromRoot(root, outside), undefined);
 });
 
 test("shortSha handles missing and full SHA values", () => {

@@ -100,6 +100,65 @@ function mergeFileStatuses(primary, additions) {
   return Array.from(byPath.values()).sort((a, b) => a.path.localeCompare(b.path));
 }
 
+function buildChangeIndex(files) {
+  const byPath = new Map();
+  const byOldPath = new Map();
+  const folders = new Set();
+  const stats = {
+    A: 0,
+    M: 0,
+    D: 0,
+    R: 0,
+    C: 0,
+    U: 0,
+    other: 0,
+  };
+
+  for (const file of files) {
+    byPath.set(file.path, file);
+    addParentFolders(folders, file.path);
+
+    if (file.oldPath) {
+      byOldPath.set(file.oldPath, file);
+      addParentFolders(folders, file.oldPath);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(stats, file.statusKind)) {
+      stats[file.statusKind] += 1;
+    } else {
+      stats.other += 1;
+    }
+  }
+
+  return {
+    byPath,
+    byOldPath,
+    folders,
+    stats,
+  };
+}
+
+function addParentFolders(folders, filePath) {
+  let current = path.posix.dirname(filePath);
+  while (current && current !== ".") {
+    folders.add(current);
+    current = path.posix.dirname(current);
+  }
+}
+
+function relativePathFromRoot(rootPath, filePath) {
+  const relativePath = path.relative(rootPath, filePath);
+  if (
+    !relativePath ||
+    relativePath.startsWith("..") ||
+    path.isAbsolute(relativePath)
+  ) {
+    return undefined;
+  }
+
+  return relativePath.split(path.sep).join("/");
+}
+
 function statusInfo(statusKind) {
   switch (statusKind) {
     case "A":
@@ -178,12 +237,14 @@ function formatError(error) {
 }
 
 module.exports = {
+  buildChangeIndex,
   formatError,
   mergeFileStatuses,
   normalizeFsPath,
   parseNameStatus,
   parseUntrackedFiles,
   parseWorktreeList,
+  relativePathFromRoot,
   shortSha,
   statusInfo,
   trimTrailingNewline,

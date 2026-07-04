@@ -2,7 +2,7 @@
   "name": "worktree-review",
   "displayName": "Worktree Review",
   "description": "Review Git worktree branches from your current repository without switching branches.",
-  "version": "0.0.2",
+  "version": "0.1.0",
   "publisher": "zfan2356",
   "license": "MIT",
   "engines": {
@@ -19,11 +19,14 @@
   ],
   "main": "./src/extension.js",
   "activationEvents": [
+    "onStartupFinished",
     "onView:worktreeReview.worktrees",
     "onCommand:worktreeReview.refresh",
     "onCommand:worktreeReview.selectBaseRef",
-    "onCommand:worktreeReview.openDiff",
-    "onCommand:worktreeReview.openWorktreeFile",
+    "onCommand:worktreeReview.selectWorktree",
+    "onCommand:worktreeReview.selectMode",
+    "onCommand:worktreeReview.openCurrentFileReview",
+    "onCommand:worktreeReview.openChangedFile",
     "onCommand:worktreeReview.copyWorktreePath"
   ],
   "contributes": {
@@ -56,16 +59,28 @@
         "icon": "$(git-branch)"
       },
       {
-        "command": "worktreeReview.openDiff",
-        "title": "Open Diff",
+        "command": "worktreeReview.selectWorktree",
+        "title": "Select Worktree",
+        "category": "Worktree Review",
+        "icon": "$(git-branch)"
+      },
+      {
+        "command": "worktreeReview.selectMode",
+        "title": "Select Mode",
+        "category": "Worktree Review",
+        "icon": "$(settings)"
+      },
+      {
+        "command": "worktreeReview.openCurrentFileReview",
+        "title": "Open Current File Review",
         "category": "Worktree Review",
         "icon": "$(diff)"
       },
       {
-        "command": "worktreeReview.openWorktreeFile",
-        "title": "Open Worktree File",
+        "command": "worktreeReview.openChangedFile",
+        "title": "Open Changed File",
         "category": "Worktree Review",
-        "icon": "$(go-to-file)"
+        "icon": "$(list-selection)"
       },
       {
         "command": "worktreeReview.copyWorktreePath",
@@ -102,6 +117,16 @@
           "command": "worktreeReview.selectBaseRef",
           "when": "view == worktreeReview.worktrees",
           "group": "navigation"
+        },
+        {
+          "command": "worktreeReview.selectMode",
+          "when": "view == worktreeReview.worktrees",
+          "group": "navigation"
+        },
+        {
+          "command": "worktreeReview.openChangedFile",
+          "when": "view == worktreeReview.worktrees",
+          "group": "navigation"
         }
       ],
       "view/item/context": [
@@ -111,18 +136,20 @@
           "group": "navigation"
         },
         {
-          "command": "worktreeReview.openDiff",
-          "when": "view == worktreeReview.worktrees && viewItem == changedFile",
+          "command": "worktreeReview.selectWorktree",
+          "when": "view == worktreeReview.worktrees && (viewItem == worktree || viewItem == worktreeActive)",
           "group": "inline"
         },
         {
-          "command": "worktreeReview.openWorktreeFile",
-          "when": "view == worktreeReview.worktrees && viewItem == changedFile",
-          "group": "navigation"
-        },
-        {
           "command": "worktreeReview.copyWorktreePath",
-          "when": "view == worktreeReview.worktrees && viewItem == worktree",
+          "when": "view == worktreeReview.worktrees && (viewItem == worktree || viewItem == worktreeActive)",
+          "group": "navigation"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "worktreeReview.openCurrentFileReview",
+          "when": "resourceScheme == file",
           "group": "navigation"
         }
       ]

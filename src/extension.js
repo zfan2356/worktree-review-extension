@@ -5,49 +5,88 @@ const fs = require("fs");
 const path = require("path");
 const vscode = require("vscode");
 const {
+  buildChangeIndex,
   formatError,
   mergeFileStatuses,
   normalizeFsPath,
   parseNameStatus,
   parseUntrackedFiles,
   parseWorktreeList,
+  relativePathFromRoot,
   shortSha,
   statusInfo,
   trimTrailingNewline,
 } = require("./git-utils");
 
 const GIT_BLOB_SCHEME = "worktree-review";
-const STATUS_SCHEME = "worktree-review-status";
 const MAX_GIT_BUFFER = 20 * 1024 * 1024;
+const MODE_KEY = "worktreeReview.mode";
+const MODES = {
+  off: {
+    label: "Off",
+    description: "Explorer opens normal files",
+    icon: "circle-slash",
+  },
+  diff: {
+    label: "Diff",
+    description: "Explorer opens base vs worktree diffs",
+    icon: "diff",
+  },
+  preview: {
+    label: "Preview",
+    description: "Explorer opens real worktree files",
+    icon: "go-to-file",
+  },
+};
 
 function activate(context) {
   const git = new Git();
-  const provider = new WorktreeReviewProvider(git);
+  const provider = new WorktreeReviewProvider(git, context);
+  const decorations = new ExplorerDecorationProvider(provider);
+  const statusBar = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Left,
+    100
+  );
+
+  provider.setDecorationProvider(decorations);
+  provider.setStatusBar(statusBar);
 
   context.subscriptions.push(
     vscode.workspace.registerTextDocumentContentProvider(
       GIT_BLOB_SCHEME,
       new GitBlobContentProvider(git)
     ),
-    vscode.window.registerFileDecorationProvider(new ReviewFileDecorationProvider()),
+    vscode.window.registerFileDecorationProvider(decorations),
     vscode.window.createTreeView("worktreeReview.worktrees", {
       treeDataProvider: provider,
-      showCollapseAll: true,
+      showCollapseAll: false,
     }),
+    statusBar,
+    vscode.window.onDidChangeActiveTextEditor((editor) =>
+      provider.handleActiveEditor(editor)
+    ),
     vscode.commands.registerCommand("worktreeReview.refresh", () => provider.refresh()),
     vscode.commands.registerCommand("worktreeReview.selectBaseRef", (node) =>
       provider.selectBaseRef(node)
     ),
-    vscode.commands.registerCommand("worktreeReview.openDiff", (node) =>
-      provider.openDiff(node)
+    vscode.commands.registerCommand("worktreeReview.selectWorktree", (node) =>
+      provider.selectWorktree(node)
     ),
-    vscode.commands.registerCommand("worktreeReview.openWorktreeFile", (node) =>
-      provider.openWorktreeFile(node)
+    vscode.commands.registerCommand("worktreeReview.selectMode", (node) =>
+      provider.selectMode(node)
+    ),
+    vscode.commands.registerCommand("worktreeReview.openCurrentFileReview", () =>
+      provider.openCurrentFileReview()
+    ),
+    vscode.commands.registerCommand("worktreeReview.openChangedFile", () =>
+      provider.openChangedFileQuickPick()
     ),
     vscode.commands.registerCommand("worktreeReview.copyWorktreePath", (node) =>
       provider.copyWorktreePath(node)
     )
   );
+
+  provider.updateStatusBar();
 }
 
 function deactivate() {}
@@ -101,32 +140,61 @@ class GitBlobContentProvider {
   }
 }
 
-class ReviewFileDecorationProvider {
-  provideFileDecoration(uri) {
-    if (uri.scheme !== STATUS_SCHEME) {
-      return undefined;
-    }
+class ExplorerDecorationProvider {
+  constructor(provider) {
+    this.provider = provider;
+    this._onDidChangeFileDecorations = new vscode.EventEmitter();
+    this.onDidChangeFileDecorations = this._onDidChangeFileDecorations.event;
+  }
 
-    const status = decodeURIComponent(uri.query || "M");
-    const info = statusInfo(status);
-    return new vscode.FileDecoration(
-      info.badge,
-      info.tooltip,
-      new vscode.ThemeColor(info.color)
-    );
+  refresh() {
+    this._onDidChangeFileDecorations.fire(undefined);
+  }
+
+  provideFileDecoration(uri) {
+    return this.provider.provideExplorerDecoration(uri);
   }
 }
 
 class WorktreeReviewProvider {
-  constructor(git) {
+  constructor(git, context) {
     this.git = git;
+    this.context = context;
+    this.mode = context.workspaceState.get(MODE_KEY, "diff");
     this.baseRefs = new Map();
+    this.repoCache = new Map();
+    this.activeWorktrees = new Map();
+    this.changeStates = new Map();
+    this.openingReview = false;
     this._onDidChangeTreeData = new vscode.EventEmitter();
     this.onDidChangeTreeData = this._onDidChangeTreeData.event;
   }
 
+  setDecorationProvider(provider) {
+    this.decorationProvider = provider;
+  }
+
+  setStatusBar(statusBar) {
+    this.statusBar = statusBar;
+  }
+
   refresh() {
     this._onDidChangeTreeData.fire();
+    this.refreshActiveChanges();
+  }
+
+  async refreshActiveChanges() {
+    const active = Array.from(this.activeWorktrees.values());
+    for (const worktree of active) {
+      try {
+        await this.rebuildChangeState(worktree);
+      } catch (error) {
+        vscode.window.showWarningMessage(`Worktree Review refresh failed: ${formatError(error)}`);
+      }
+    }
+
+    this.decorationProvider && this.decorationProvider.refresh();
+    this.updateStatusBar();
   }
 
   async getChildren(node) {
@@ -140,16 +208,13 @@ class WorktreeReviewProvider {
 
       if (node.kind === "repo") {
         const worktrees = await this.getWorktrees(node);
-        return worktrees.length > 0
-          ? worktrees
-          : [new MessageNode("No linked worktrees found.")];
-      }
+        const modeNodes = Object.keys(MODES).map(
+          (mode) => new ModeNode(this, node, mode, this.mode === mode)
+        );
 
-      if (node.kind === "worktree") {
-        const files = await this.getChangedFiles(node);
-        return files.length > 0
-          ? files
-          : [new MessageNode("No changes compared with the selected base.")];
+        return worktrees.length > 0
+          ? [...modeNodes, ...worktrees]
+          : [...modeNodes, new MessageNode("No linked worktrees found.")];
       }
     } catch (error) {
       return [new MessageNode(formatError(error))];
@@ -173,15 +238,18 @@ class WorktreeReviewProvider {
         continue;
       }
 
-      const normalized = normalizeFsPath(root);
-      if (seen.has(normalized)) {
+      const key = normalizeFsPath(root);
+      if (seen.has(key)) {
         continue;
       }
 
-      seen.add(normalized);
+      seen.add(key);
       const currentRef = await this.getCurrentRef(root);
-      const baseRef = this.baseRefs.get(normalized) || currentRef || "HEAD";
-      repos.push(new RepoNode(root, currentRef, baseRef));
+      const baseRef = this.baseRefs.get(key) || currentRef || "HEAD";
+      const activeWorktree = this.activeWorktrees.get(key);
+      const repo = new RepoNode(root, currentRef, baseRef, key, activeWorktree, this.mode);
+      this.repoCache.set(key, repo);
+      repos.push(repo);
     }
 
     return repos;
@@ -220,6 +288,7 @@ class WorktreeReviewProvider {
       .getConfiguration("worktreeReview")
       .get("includeCurrentWorktree", false);
     const currentRoot = normalizeFsPath(repo.repoRoot);
+    const active = this.activeWorktrees.get(repo.key);
     const worktrees = [];
 
     for (const worktree of parsed) {
@@ -228,7 +297,14 @@ class WorktreeReviewProvider {
       }
 
       const dirty = await this.isDirty(worktree.path);
-      worktrees.push(new WorktreeNode(repo, worktree, dirty));
+      const node = new WorktreeNode(
+        repo,
+        worktree,
+        dirty,
+        Boolean(active && normalizeFsPath(active.path) === normalizeFsPath(worktree.path)),
+        this.changeStates.get(repo.key)
+      );
+      worktrees.push(node);
     }
 
     return worktrees;
@@ -243,22 +319,101 @@ class WorktreeReviewProvider {
     }
   }
 
-  async getChangedFiles(worktreeNode) {
-    const baseRef = worktreeNode.repo.baseRef;
-    const headRef = worktreeNode.headRef;
+  async selectWorktree(node) {
+    let worktree = node && node.kind === "worktree" ? node : undefined;
+
+    if (!worktree) {
+      worktree = await this.pickWorktree();
+    }
+
+    if (!worktree) {
+      return;
+    }
+
+    this.activeWorktrees.set(worktree.repo.key, worktree);
+    await this.rebuildChangeState(worktree);
+    this._onDidChangeTreeData.fire();
+    this.decorationProvider && this.decorationProvider.refresh();
+    this.updateStatusBar();
+  }
+
+  async pickWorktree() {
+    const repos = await this.getRepositories();
+    const picks = [];
+
+    for (const repo of repos) {
+      const worktrees = await this.getWorktrees(repo);
+      for (const worktree of worktrees) {
+        picks.push({
+          label: worktree.label,
+          description: path.basename(repo.repoRoot),
+          detail: worktree.path,
+          worktree,
+        });
+      }
+    }
+
+    const picked = await vscode.window.showQuickPick(picks, {
+      placeHolder: "Select worktree to review",
+      matchOnDescription: true,
+      matchOnDetail: true,
+    });
+
+    return picked && picked.worktree;
+  }
+
+  async selectMode(node) {
+    let mode = node && node.kind === "mode" ? node.mode : undefined;
+
+    if (!mode) {
+      const picked = await vscode.window.showQuickPick(
+        Object.entries(MODES).map(([value, info]) => ({
+          label: info.label,
+          description: info.description,
+          value,
+        })),
+        { placeHolder: "Select Worktree Review mode" }
+      );
+      mode = picked && picked.value;
+    }
+
+    if (!mode || !MODES[mode]) {
+      return;
+    }
+
+    this.mode = mode;
+    await this.context.workspaceState.update(MODE_KEY, mode);
+    this._onDidChangeTreeData.fire();
+    this.updateStatusBar();
+  }
+
+  async rebuildChangeState(worktree) {
+    const files = await this.getChangedFiles(worktree);
+    const index = buildChangeIndex(files);
+    this.changeStates.set(worktree.repo.key, {
+      repo: worktree.repo,
+      worktree,
+      files,
+      index,
+    });
+  }
+
+  async getChangedFiles(worktree) {
+    const baseRef = worktree.repo.baseRef;
+    const headRef = worktree.headRef;
     const compareBaseRef = await this.getCompareBaseRef(
-      worktreeNode.repo.repoRoot,
+      worktree.repo.repoRoot,
       baseRef,
       headRef
     );
-    const changed = await this.getDiffFiles(worktreeNode.path, compareBaseRef);
-    const untracked = await this.getUntrackedFiles(worktreeNode.path);
+    const changed = await this.getDiffFiles(worktree.path, compareBaseRef);
+    const untracked = await this.getUntrackedFiles(worktree.path);
     const files = mergeFileStatuses(changed, untracked);
 
-    return files.map((file) => {
-      file.compareBaseRef = compareBaseRef;
-      return new ChangedFileNode(worktreeNode, file);
-    });
+    return files.map((file) => ({
+      ...file,
+      compareBaseRef,
+    }));
   }
 
   async getCompareBaseRef(repoRoot, baseRef, headRef) {
@@ -293,25 +448,7 @@ class WorktreeReviewProvider {
     let repo = node && node.kind === "repo" ? node : node && node.repo;
 
     if (!repo) {
-      const repos = await this.getRepositories();
-      if (repos.length === 0) {
-        vscode.window.showWarningMessage("Open a Git repository first.");
-        return;
-      }
-
-      if (repos.length === 1) {
-        repo = repos[0];
-      } else {
-        const repoPick = await vscode.window.showQuickPick(
-          repos.map((candidate) => ({
-            label: path.basename(candidate.repoRoot),
-            description: candidate.repoRoot,
-            repo: candidate,
-          })),
-          { placeHolder: "Select repository" }
-        );
-        repo = repoPick && repoPick.repo;
-      }
+      repo = await this.pickRepo();
     }
 
     if (!repo) {
@@ -334,8 +471,41 @@ class WorktreeReviewProvider {
       return;
     }
 
-    this.baseRefs.set(normalizeFsPath(repo.repoRoot), selected.label);
-    this.refresh();
+    this.baseRefs.set(repo.key, selected.label);
+    repo.baseRef = selected.label;
+
+    const active = this.activeWorktrees.get(repo.key);
+    if (active) {
+      active.repo.baseRef = selected.label;
+      await this.rebuildChangeState(active);
+    }
+
+    this._onDidChangeTreeData.fire();
+    this.decorationProvider && this.decorationProvider.refresh();
+    this.updateStatusBar();
+  }
+
+  async pickRepo() {
+    const repos = await this.getRepositories();
+    if (repos.length === 0) {
+      vscode.window.showWarningMessage("Open a Git repository first.");
+      return undefined;
+    }
+
+    if (repos.length === 1) {
+      return repos[0];
+    }
+
+    const repoPick = await vscode.window.showQuickPick(
+      repos.map((candidate) => ({
+        label: path.basename(candidate.repoRoot),
+        description: candidate.repoRoot,
+        repo: candidate,
+      })),
+      { placeHolder: "Select repository" }
+    );
+
+    return repoPick && repoPick.repo;
   }
 
   async listRefs(repoRoot) {
@@ -367,13 +537,149 @@ class WorktreeReviewProvider {
     return Array.from(refs).sort((a, b) => a.localeCompare(b));
   }
 
-  async openDiff(node) {
-    if (!node || node.kind !== "changedFile") {
+  provideExplorerDecoration(uri) {
+    if (uri.scheme !== "file" || this.mode === "off") {
+      return undefined;
+    }
+
+    const match = this.findChangeForUri(uri);
+    if (match && match.file) {
+      const info = statusInfo(match.file.statusKind);
+      return new vscode.FileDecoration(
+        info.badge,
+        `Worktree Review: ${info.tooltip}`,
+        new vscode.ThemeColor(info.color)
+      );
+    }
+
+    const folder = this.findChangedFolderForUri(uri);
+    if (folder) {
+      return new vscode.FileDecoration(
+        undefined,
+        "Worktree Review changes inside",
+        new vscode.ThemeColor("gitDecoration.modifiedResourceForeground")
+      );
+    }
+
+    return undefined;
+  }
+
+  async handleActiveEditor(editor) {
+    if (!editor || this.mode === "off" || this.openingReview) {
       return;
     }
 
-    const file = node.file;
-    const worktree = node.worktree;
+    const document = editor.document;
+    if (!document || document.uri.scheme !== "file") {
+      return;
+    }
+
+    const match = this.findChangeForUri(document.uri);
+    if (!match) {
+      return;
+    }
+
+    this.openingReview = true;
+    try {
+      if (!document.isDirty) {
+        await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+      }
+
+      await this.openReviewTarget(match, { fromExplorer: true });
+    } catch (error) {
+      vscode.window.showWarningMessage(`Worktree Review open failed: ${formatError(error)}`);
+    } finally {
+      setTimeout(() => {
+        this.openingReview = false;
+      }, 100);
+    }
+  }
+
+  async openCurrentFileReview() {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document.uri.scheme !== "file") {
+      vscode.window.showWarningMessage("Open a workspace file first.");
+      return;
+    }
+
+    const match = this.findChangeForUri(editor.document.uri);
+    if (!match) {
+      vscode.window.showInformationMessage(
+        "The active file has no changes in the selected worktree."
+      );
+      return;
+    }
+
+    await this.openReviewTarget(match, { fromExplorer: false });
+  }
+
+  async openChangedFileQuickPick() {
+    const states = Array.from(this.changeStates.values());
+    if (states.length === 0) {
+      vscode.window.showWarningMessage("Select a worktree first.");
+      return;
+    }
+
+    const picks = [];
+    for (const state of states) {
+      for (const file of state.files) {
+        const info = statusInfo(file.statusKind);
+        picks.push({
+          label: `${info.badge} ${file.path}`,
+          description: state.worktree.label,
+          detail: file.oldPath ? `${file.oldPath} -> ${file.path}` : undefined,
+          state,
+          file,
+        });
+      }
+    }
+
+    const picked = await vscode.window.showQuickPick(picks, {
+      placeHolder: "Open changed file from selected worktree",
+      matchOnDescription: true,
+      matchOnDetail: true,
+    });
+
+    if (!picked) {
+      return;
+    }
+
+    await this.openReviewTarget({
+      state: picked.state,
+      worktree: picked.state.worktree,
+      repo: picked.state.repo,
+      file: picked.file,
+    });
+  }
+
+  async openReviewTarget(target) {
+    if (this.mode === "preview") {
+      const opened = await this.openPreviewForFile(target.worktree, target.file);
+      if (opened) {
+        return;
+      }
+    }
+
+    await this.openDiffForFile(target.worktree, target.file);
+  }
+
+  async openPreviewForFile(worktree, file) {
+    if (file.statusKind === "D") {
+      await this.openDiffForFile(worktree, file);
+      return true;
+    }
+
+    const uri = this.getWorktreeFileUri(worktree, file.path);
+    if (!uri) {
+      await this.openDiffForFile(worktree, file);
+      return true;
+    }
+
+    await vscode.window.showTextDocument(uri, { preview: false });
+    return true;
+  }
+
+  async openDiffForFile(worktree, file) {
     const leftPath = file.oldPath || file.path;
     const rightPath = file.path;
     const leftUri =
@@ -392,20 +698,6 @@ class WorktreeReviewProvider {
     });
   }
 
-  async openWorktreeFile(node) {
-    if (!node || node.kind !== "changedFile") {
-      return;
-    }
-
-    const uri = this.getWorktreeFileUri(node.worktree, node.file.path);
-    if (!uri) {
-      vscode.window.showWarningMessage("This file does not exist in the selected worktree.");
-      return;
-    }
-
-    await vscode.window.showTextDocument(uri, { preview: false });
-  }
-
   getWorktreeFileUri(worktree, relativePath) {
     const filePath = path.join(worktree.path, ...relativePath.split("/"));
     if (!fs.existsSync(filePath)) {
@@ -413,6 +705,44 @@ class WorktreeReviewProvider {
     }
 
     return vscode.Uri.file(filePath);
+  }
+
+  findChangeForUri(uri) {
+    for (const state of this.changeStates.values()) {
+      const relativePath = relativePathFromRoot(state.repo.repoRoot, uri.fsPath);
+      if (!relativePath) {
+        continue;
+      }
+
+      const file =
+        state.index.byPath.get(relativePath) ||
+        state.index.byOldPath.get(relativePath);
+      if (file) {
+        return {
+          state,
+          repo: state.repo,
+          worktree: state.worktree,
+          relativePath,
+          file,
+        };
+      }
+    }
+
+    return undefined;
+  }
+
+  findChangedFolderForUri(uri) {
+    for (const state of this.changeStates.values()) {
+      const relativePath = relativePathFromRoot(state.repo.repoRoot, uri.fsPath);
+      if (relativePath && state.index.folders.has(relativePath)) {
+        return {
+          state,
+          relativePath,
+        };
+      }
+    }
+
+    return undefined;
   }
 
   async copyWorktreePath(node) {
@@ -423,14 +753,38 @@ class WorktreeReviewProvider {
     await vscode.env.clipboard.writeText(node.path);
     vscode.window.showInformationMessage(`Copied ${node.path}`);
   }
+
+  updateStatusBar() {
+    if (!this.statusBar) {
+      return;
+    }
+
+    const states = Array.from(this.changeStates.values());
+    const firstState = states[0];
+    if (this.mode === "off") {
+      this.statusBar.text = "$(circle-slash) WTR: Off";
+    } else if (firstState) {
+      this.statusBar.text = `$(git-branch) WTR: ${firstState.worktree.label} · ${MODES[this.mode].label}`;
+    } else {
+      this.statusBar.text = `$(git-branch) WTR: Select worktree · ${MODES[this.mode].label}`;
+    }
+
+    this.statusBar.tooltip =
+      "Worktree Review: select worktree or mode from the sidebar";
+    this.statusBar.command = "worktreeReview.selectWorktree";
+    this.statusBar.show();
+  }
 }
 
 class RepoNode {
-  constructor(repoRoot, currentRef, baseRef) {
+  constructor(repoRoot, currentRef, baseRef, key, activeWorktree, mode) {
     this.kind = "repo";
     this.repoRoot = repoRoot;
     this.currentRef = currentRef;
     this.baseRef = baseRef;
+    this.key = key;
+    this.activeWorktree = activeWorktree;
+    this.mode = mode;
   }
 
   getTreeItem() {
@@ -438,16 +792,45 @@ class RepoNode {
       path.basename(this.repoRoot),
       vscode.TreeItemCollapsibleState.Expanded
     );
-    item.description = `base: ${this.baseRef}`;
-    item.tooltip = `${this.repoRoot}\nCurrent: ${this.currentRef}\nBase: ${this.baseRef}`;
+    const target = this.activeWorktree ? this.activeWorktree.label : "none";
+    item.description = `base: ${this.baseRef} · target: ${target} · ${MODES[this.mode].label}`;
+    item.tooltip = `${this.repoRoot}\nCurrent: ${this.currentRef}\nBase: ${this.baseRef}\nTarget: ${target}`;
     item.contextValue = "repo";
     item.iconPath = new vscode.ThemeIcon("repo");
     return item;
   }
 }
 
+class ModeNode {
+  constructor(provider, repo, mode, active) {
+    this.kind = "mode";
+    this.provider = provider;
+    this.repo = repo;
+    this.mode = mode;
+    this.active = active;
+  }
+
+  getTreeItem() {
+    const info = MODES[this.mode];
+    const item = new vscode.TreeItem(
+      `Mode: ${info.label}`,
+      vscode.TreeItemCollapsibleState.None
+    );
+    item.description = this.active ? "active" : undefined;
+    item.tooltip = info.description;
+    item.contextValue = "mode";
+    item.iconPath = new vscode.ThemeIcon(this.active ? "check" : info.icon);
+    item.command = {
+      command: "worktreeReview.selectMode",
+      title: "Select Mode",
+      arguments: [this],
+    };
+    return item;
+  }
+}
+
 class WorktreeNode {
-  constructor(repo, worktree, dirty) {
+  constructor(repo, worktree, dirty, active, changeState) {
     this.kind = "worktree";
     this.repo = repo;
     this.path = worktree.path;
@@ -455,51 +838,37 @@ class WorktreeNode {
     this.branch = worktree.branch;
     this.detached = worktree.detached;
     this.dirty = dirty;
+    this.active = active;
     this.headRef = this.branch || this.head || "HEAD";
     this.label = this.branch || shortSha(this.head) || path.basename(this.path);
+    this.changeState = active ? changeState : undefined;
   }
 
   getTreeItem() {
-    const item = new vscode.TreeItem(this.label, vscode.TreeItemCollapsibleState.Collapsed);
-    item.description = this.dirty ? "dirty" : undefined;
+    const item = new vscode.TreeItem(this.label, vscode.TreeItemCollapsibleState.None);
+    const details = [];
+    if (this.active) {
+      details.push("active");
+    }
+    if (this.dirty) {
+      details.push("dirty");
+    }
+    if (this.changeState) {
+      const summary = formatStats(this.changeState.index.stats);
+      if (summary) {
+        details.push(summary);
+      }
+    }
+
+    item.description = details.join(" · ") || undefined;
     item.tooltip = `${this.path}\nHEAD: ${this.head || "unknown"}\nCompare: ${this.repo.baseRef}...${this.headRef}`;
-    item.contextValue = "worktree";
-    item.iconPath = new vscode.ThemeIcon(this.dirty ? "git-compare" : "git-branch");
-    return item;
-  }
-}
-
-class ChangedFileNode {
-  constructor(worktree, file) {
-    this.kind = "changedFile";
-    this.worktree = worktree;
-    this.repo = worktree.repo;
-    this.file = file;
-  }
-
-  getTreeItem() {
-    const label = path.posix.basename(this.file.path);
-    const dir = path.posix.dirname(this.file.path);
-    const info = statusInfo(this.file.statusKind);
-    const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
-
-    item.description = dir === "." ? info.label : `${info.label} ${dir}`;
-    item.tooltip = this.file.oldPath
-      ? `${info.tooltip}: ${this.file.oldPath} -> ${this.file.path}`
-      : `${info.tooltip}: ${this.file.path}`;
-    item.contextValue = "changedFile";
+    item.contextValue = this.active ? "worktreeActive" : "worktree";
+    item.iconPath = new vscode.ThemeIcon(this.active ? "pass-filled" : "git-branch");
     item.command = {
-      command: "worktreeReview.openDiff",
-      title: "Open Diff",
+      command: "worktreeReview.selectWorktree",
+      title: "Select Worktree",
       arguments: [this],
     };
-    item.iconPath = new vscode.ThemeIcon(info.icon);
-    item.resourceUri = vscode.Uri.from({
-      scheme: STATUS_SCHEME,
-      path: `/${this.file.path}`,
-      query: encodeURIComponent(this.file.statusKind),
-    });
-
     return item;
   }
 }
@@ -516,6 +885,13 @@ class MessageNode {
     item.iconPath = new vscode.ThemeIcon("info");
     return item;
   }
+}
+
+function formatStats(stats) {
+  return ["M", "A", "D", "R", "C", "U"]
+    .filter((key) => stats[key] > 0)
+    .map((key) => `${key}${stats[key]}`)
+    .join(" ");
 }
 
 function makeGitBlobUri(repoRoot, ref, filePath) {
