@@ -537,11 +537,7 @@ class WorktreeReviewProvider {
       if (node.kind === "mode") {
         await this.selectMode(node);
       } else if (node.kind === "worktree") {
-        if (node.active && node.changeState) {
-          await this.revealTreeNode(node, true);
-        } else {
-          await this.selectWorktree(node);
-        }
+        await this.selectWorktree(node);
       } else if (node.kind === "changedFile") {
         await this.openChangedFile(node);
       }
@@ -596,18 +592,16 @@ class WorktreeReviewProvider {
         const modeNodes = Object.keys(MODES).map(
           (mode) => new ModeNode(this, node, mode, this.mode === mode)
         );
+        const changeState = this.changeStates.get(node.key);
+        const changeNodes = changeState ? buildChangedPathNodes(changeState) : [];
 
         return worktrees.length > 0
-          ? [...modeNodes, ...worktrees]
-          : [...modeNodes, new MessageNode("No linked worktrees found.")];
+          ? [...modeNodes, ...changeNodes, ...worktrees]
+          : [...modeNodes, ...changeNodes, new MessageNode("No linked worktrees found.")];
       }
 
-      if (node.kind === "worktree" && node.changeState) {
-        return node.changeState.files.length > 0
-          ? node.changeState.files.map(
-              (file) => new ChangedFileNode(node.changeState, file)
-            )
-          : [new MessageNode("No changed files.")];
+      if (node.kind === "changedFolder") {
+        return node.children;
       }
     } catch (error) {
       return [new MessageNode(formatError(error))];
@@ -1377,11 +1371,7 @@ class WorktreeNode {
   }
 
   getTreeItem() {
-    const collapsibleState =
-      this.active && this.changeState
-        ? vscode.TreeItemCollapsibleState.Expanded
-        : vscode.TreeItemCollapsibleState.None;
-    const item = new vscode.TreeItem(this.label, collapsibleState);
+    const item = new vscode.TreeItem(this.label, vscode.TreeItemCollapsibleState.None);
     const details = [];
     if (this.active) {
       details.push("active");
@@ -1400,6 +1390,31 @@ class WorktreeNode {
     item.tooltip = `${this.path}\nHEAD: ${this.head || "unknown"}\nCompare: ${this.repo.baseRef}...${this.headRef}`;
     item.contextValue = this.active ? "worktreeActive" : "worktree";
     item.iconPath = new vscode.ThemeIcon(this.active ? "pass-filled" : "git-branch");
+    return item;
+  }
+}
+
+class ChangedFolderNode {
+  constructor(state, fullPath, label, children) {
+    this.kind = "changedFolder";
+    this.state = state;
+    this.fullPath = fullPath;
+    this.label = label;
+    this.children = children;
+  }
+
+  getTreeItem() {
+    const item = new vscode.TreeItem(
+      this.label,
+      vscode.TreeItemCollapsibleState.Expanded
+    );
+    item.description = summarizeChangedChildren(this.children);
+    item.tooltip = this.fullPath;
+    item.contextValue = "changedFolder";
+    item.iconPath = new vscode.ThemeIcon("folder");
+    item.resourceUri = vscode.Uri.file(
+      path.join(this.state.repo.repoRoot, ...this.fullPath.split("/"))
+    );
     return item;
   }
 }
@@ -1429,6 +1444,73 @@ class ChangedFileNode {
     );
     return item;
   }
+}
+
+function buildChangedPathNodes(state) {
+  const root = { folders: new Map(), files: [] };
+
+  for (const file of state.files) {
+    const parts = file.path.split("/").filter(Boolean);
+    if (parts.length === 0) {
+      continue;
+    }
+
+    let cursor = root;
+    for (const part of parts.slice(0, -1)) {
+      let next = cursor.folders.get(part);
+      if (!next) {
+        next = { folders: new Map(), files: [] };
+        cursor.folders.set(part, next);
+      }
+      cursor = next;
+    }
+
+    cursor.files.push(file);
+  }
+
+  return materializeChangedPathNodes(state, root, "");
+}
+
+function materializeChangedPathNodes(state, source, parentPath) {
+  const folders = Array.from(source.folders.entries())
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([label, child]) => {
+      const fullPath = parentPath ? `${parentPath}/${label}` : label;
+      return new ChangedFolderNode(
+        state,
+        fullPath,
+        label,
+        materializeChangedPathNodes(state, child, fullPath)
+      );
+    });
+  const files = source.files
+    .slice()
+    .sort((left, right) => left.path.localeCompare(right.path))
+    .map((file) => new ChangedFileNode(state, file));
+
+  return [...folders, ...files];
+}
+
+function summarizeChangedChildren(children) {
+  const stats = countChangedChildren({ children });
+  return ["M", "A", "D", "R", "C", "U"]
+    .filter((key) => stats[key] > 0)
+    .map((key) => `${key}${stats[key]}`)
+    .join(" ") || undefined;
+}
+
+function countChangedChildren(node) {
+  const stats = {};
+  for (const child of node.children) {
+    if (child.kind === "changedFile") {
+      stats[child.file.statusKind] = (stats[child.file.statusKind] || 0) + 1;
+    } else if (child.kind === "changedFolder") {
+      for (const [kind, count] of Object.entries(countChangedChildren(child))) {
+        stats[kind] = (stats[kind] || 0) + count;
+      }
+    }
+  }
+  return stats;
 }
 
 class MessageNode {
