@@ -101,8 +101,8 @@ function activate(context) {
     vscode.commands.registerCommand("worktreeReview.openCurrentFileReview", () =>
       provider.openCurrentFileReview()
     ),
-    vscode.commands.registerCommand("worktreeReview.openChangedFile", () =>
-      provider.openChangedFileQuickPick()
+    vscode.commands.registerCommand("worktreeReview.openChangedFile", (node) =>
+      provider.openChangedFile(node)
     ),
     vscode.commands.registerCommand("worktreeReview.focusDiffPanel", () =>
       provider.focusDiffPanel()
@@ -551,6 +551,14 @@ class WorktreeReviewProvider {
           ? [...modeNodes, ...worktrees]
           : [...modeNodes, new MessageNode("No linked worktrees found.")];
       }
+
+      if (node.kind === "worktree" && node.changeState) {
+        return node.changeState.files.length > 0
+          ? node.changeState.files.map(
+              (file) => new ChangedFileNode(node.changeState, file)
+            )
+          : [new MessageNode("No changed files.")];
+      }
     } catch (error) {
       return [new MessageNode(formatError(error))];
     }
@@ -993,6 +1001,20 @@ class WorktreeReviewProvider {
     await this.openReviewTarget(match, { fromExplorer: false });
   }
 
+  async openChangedFile(node) {
+    if (node && node.kind === "changedFile") {
+      await this.openReviewTarget({
+        state: node.state,
+        worktree: node.state.worktree,
+        repo: node.state.repo,
+        file: node.file,
+      });
+      return;
+    }
+
+    await this.openChangedFileQuickPick();
+  }
+
   async openChangedFileQuickPick() {
     const states = Array.from(this.changeStates.values());
     if (states.length === 0) {
@@ -1310,7 +1332,11 @@ class WorktreeNode {
   }
 
   getTreeItem() {
-    const item = new vscode.TreeItem(this.label, vscode.TreeItemCollapsibleState.None);
+    const collapsibleState =
+      this.active && this.changeState
+        ? vscode.TreeItemCollapsibleState.Expanded
+        : vscode.TreeItemCollapsibleState.None;
+    const item = new vscode.TreeItem(this.label, collapsibleState);
     const details = [];
     if (this.active) {
       details.push("active");
@@ -1332,6 +1358,38 @@ class WorktreeNode {
     item.command = {
       command: "worktreeReview.selectWorktree",
       title: "Select Worktree",
+      arguments: [this],
+    };
+    return item;
+  }
+}
+
+class ChangedFileNode {
+  constructor(state, file) {
+    this.kind = "changedFile";
+    this.state = state;
+    this.file = file;
+  }
+
+  getTreeItem() {
+    const info = statusInfo(this.file.statusKind);
+    const item = new vscode.TreeItem(
+      path.basename(this.file.path),
+      vscode.TreeItemCollapsibleState.None
+    );
+    const directory = path.posix.dirname(this.file.path);
+    item.description = directory && directory !== "." ? directory : undefined;
+    item.tooltip = this.file.oldPath
+      ? `${info.tooltip}: ${this.file.oldPath} -> ${this.file.path}`
+      : `${info.tooltip}: ${this.file.path}`;
+    item.contextValue = "changedFile";
+    item.iconPath = new vscode.ThemeIcon(info.icon);
+    item.resourceUri = vscode.Uri.file(
+      path.join(this.state.repo.repoRoot, ...this.file.path.split("/"))
+    );
+    item.command = {
+      command: "worktreeReview.openChangedFile",
+      title: "Open Changed File",
       arguments: [this],
     };
     return item;
