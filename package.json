@@ -119,11 +119,14 @@
       ]
     },
     "views": {
-      "worktreeReview": [
+      "explorer": [
         {
           "id": "worktreeReview.changes",
-          "name": "Changes"
-        },
+          "name": "Worktree Review: Changes",
+          "visibility": "visible"
+        }
+      ],
+      "worktreeReview": [
         {
           "id": "worktreeReview.worktrees",
           "name": "Worktrees"
