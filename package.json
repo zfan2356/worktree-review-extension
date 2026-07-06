@@ -23,6 +23,7 @@
   "main": "./src/extension.js",
   "activationEvents": [
     "onStartupFinished",
+    "onView:worktreeReview.changes",
     "onView:worktreeReview.worktrees",
     "onView:worktreeReview.secondaryDiff",
     "onCommand:worktreeReview.refresh",
@@ -120,6 +121,10 @@
     "views": {
       "worktreeReview": [
         {
+          "id": "worktreeReview.changes",
+          "name": "Changes"
+        },
+        {
           "id": "worktreeReview.worktrees",
           "name": "Worktrees"
         }
@@ -135,6 +140,16 @@
     },
     "menus": {
       "view/title": [
+        {
+          "command": "worktreeReview.refresh",
+          "when": "view == worktreeReview.changes",
+          "group": "navigation"
+        },
+        {
+          "command": "worktreeReview.openChangedFile",
+          "when": "view == worktreeReview.changes",
+          "group": "navigation"
+        },
         {
           "command": "worktreeReview.refresh",
           "when": "view == worktreeReview.worktrees",

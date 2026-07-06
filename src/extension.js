@@ -51,6 +51,7 @@ const MODES = {
 function activate(context) {
   const git = new Git();
   const provider = new WorktreeReviewProvider(git, context);
+  const changes = new WorktreeChangesProvider(provider);
   const diffPanel = new WorktreeDiffPanelProvider(git);
   const decorations = new ExplorerDecorationProvider(provider);
   const statusBar = vscode.window.createStatusBarItem(
@@ -60,13 +61,17 @@ function activate(context) {
 
   provider.setDiffPanel(diffPanel);
   provider.setDecorationProvider(decorations);
+  provider.setChangesProvider(changes);
   provider.setStatusBar(statusBar);
 
   const treeView = vscode.window.createTreeView("worktreeReview.worktrees", {
     treeDataProvider: provider,
     showCollapseAll: false,
   });
-  provider.setTreeView(treeView);
+  const changesTreeView = vscode.window.createTreeView("worktreeReview.changes", {
+    treeDataProvider: changes,
+    showCollapseAll: true,
+  });
 
   vscode.commands.executeCommand(
     "setContext",
@@ -80,6 +85,10 @@ function activate(context) {
       new GitBlobContentProvider(git)
     ),
     vscode.window.registerFileDecorationProvider(decorations),
+    changesTreeView,
+    changesTreeView.onDidChangeSelection((event) =>
+      changes.handleTreeSelection(event.selection[0])
+    ),
     treeView,
     treeView.onDidChangeSelection((event) =>
       provider.handleTreeSelection(event.selection[0])
@@ -205,6 +214,71 @@ class ExplorerDecorationProvider {
 
   provideFileDecoration(uri) {
     return this.provider.provideExplorerDecoration(uri);
+  }
+}
+
+class WorktreeChangesProvider {
+  constructor(provider) {
+    this.provider = provider;
+    this._onDidChangeTreeData = new vscode.EventEmitter();
+    this.onDidChangeTreeData = this._onDidChangeTreeData.event;
+  }
+
+  refresh() {
+    this._onDidChangeTreeData.fire();
+  }
+
+  async handleTreeSelection(node) {
+    if (!node || node.kind !== "changedFile") {
+      return;
+    }
+
+    try {
+      await this.provider.openChangedFile(node);
+    } catch (error) {
+      vscode.window.showWarningMessage(
+        `Worktree Review open failed: ${formatError(error)}`
+      );
+    }
+  }
+
+  async getChildren(node) {
+    try {
+      if (node && node.kind === "changedFolder") {
+        return node.children;
+      }
+
+      if (node) {
+        return [];
+      }
+
+      const states = Array.from(this.provider.changeStates.values());
+      if (states.length === 0) {
+        return [new MessageNode("Select a worktree to review changes.")];
+      }
+
+      const nodes = [];
+      for (const state of states) {
+        const changeNodes = buildChangedPathNodes(state);
+        if (changeNodes.length === 0) {
+          nodes.push(new MessageNode(`No changes in ${state.worktree.label}.`));
+        } else if (states.length === 1) {
+          nodes.push(...changeNodes);
+        } else {
+          nodes.push(
+            new ChangedFolderNode(state, "", state.worktree.label, changeNodes)
+          );
+        }
+      }
+
+      return nodes;
+    } catch (error) {
+      return [new MessageNode(formatError(error))];
+    }
+  }
+
+  getTreeItem(node) {
+    return node.getTreeItem();
   }
 }
 
@@ -515,12 +589,12 @@ class WorktreeReviewProvider {
     this.diffPanel = provider;
   }
 
-  setStatusBar(statusBar) {
-    this.statusBar = statusBar;
+  setChangesProvider(provider) {
+    this.changesProvider = provider;
   }
 
-  setTreeView(treeView) {
-    this.treeView = treeView;
+  setStatusBar(statusBar) {
+    this.statusBar = statusBar;
   }
 
   refresh() {
@@ -548,22 +622,6 @@ class WorktreeReviewProvider {
     }
   }
 
-  async revealTreeNode(node, expand) {
-    if (!this.treeView || !node) {
-      return;
-    }
-
-    try {
-      await this.treeView.reveal(node, {
-        select: true,
-        focus: true,
-        expand,
-      });
-    } catch {
-      // Revealing is best-effort; the tree may have refreshed the node object.
-    }
-  }
-
   async refreshActiveChanges() {
     const active = Array.from(this.activeWorktrees.values());
     for (const worktree of active) {
@@ -575,6 +633,7 @@ class WorktreeReviewProvider {
     }
 
     this.decorationProvider && this.decorationProvider.refresh();
+    this.changesProvider && this.changesProvider.refresh();
     this.updateStatusBar();
   }
 
@@ -592,16 +651,10 @@ class WorktreeReviewProvider {
         const modeNodes = Object.keys(MODES).map(
           (mode) => new ModeNode(this, node, mode, this.mode === mode)
         );
-        const changeState = this.changeStates.get(node.key);
-        const changeNodes = changeState ? buildChangedPathNodes(changeState) : [];
 
         return worktrees.length > 0
-          ? [...modeNodes, ...changeNodes, ...worktrees]
-          : [...modeNodes, ...changeNodes, new MessageNode("No linked worktrees found.")];
-      }
-
-      if (node.kind === "changedFolder") {
-        return node.children;
+          ? [...modeNodes, ...worktrees]
+          : [...modeNodes, new MessageNode("No linked worktrees found.")];
       }
     } catch (error) {
       return [new MessageNode(formatError(error))];
@@ -721,6 +774,7 @@ class WorktreeReviewProvider {
     await this.rebuildChangeState(worktree);
     this._onDidChangeTreeData.fire();
     this.decorationProvider && this.decorationProvider.refresh();
+    this.changesProvider && this.changesProvider.refresh();
     this.updateStatusBar();
   }
 
@@ -778,6 +832,7 @@ class WorktreeReviewProvider {
     }
     this._onDidChangeTreeData.fire();
     this.decorationProvider && this.decorationProvider.refresh();
+    this.changesProvider && this.changesProvider.refresh();
     this.updateStatusBar();
   }
 
@@ -789,6 +844,7 @@ class WorktreeReviewProvider {
     }
     this.activeWorktrees.clear();
     this.changeStates.clear();
+    this.changesProvider && this.changesProvider.refresh();
   }
 
   async rebuildChangeState(worktree) {
@@ -886,6 +942,7 @@ class WorktreeReviewProvider {
 
     this._onDidChangeTreeData.fire();
     this.decorationProvider && this.decorationProvider.refresh();
+    this.changesProvider && this.changesProvider.refresh();
     this.updateStatusBar();
   }
 
@@ -1476,11 +1533,12 @@ function materializeChangedPathNodes(state, source, parentPath) {
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([label, child]) => {
       const fullPath = parentPath ? `${parentPath}/${label}` : label;
+      const compacted = compactChangedFolder(label, fullPath, child);
       return new ChangedFolderNode(
         state,
-        fullPath,
-        label,
-        materializeChangedPathNodes(state, child, fullPath)
+        compacted.fullPath,
+        compacted.label,
+        materializeChangedPathNodes(state, compacted.source, compacted.fullPath)
       );
     });
   const files = source.files
@@ -1489,6 +1547,25 @@ function materializeChangedPathNodes(state, source, parentPath) {
     .map((file) => new ChangedFileNode(state, file));
 
   return [...folders, ...files];
+}
+
+function compactChangedFolder(label, fullPath, source) {
+  let compactLabel = label;
+  let compactPath = fullPath;
+  let compactSource = source;
+
+  while (compactSource.files.length === 0 && compactSource.folders.size === 1) {
+    const [[childLabel, childSource]] = compactSource.folders.entries();
+    compactLabel = `${compactLabel}/${childLabel}`;
+    compactPath = `${compactPath}/${childLabel}`;
+    compactSource = childSource;
+  }
+
+  return {
+    label: compactLabel,
+    fullPath: compactPath,
+    source: compactSource,
+  };
 }
 
 function summarizeChangedChildren(children) {
