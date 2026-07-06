@@ -21,6 +21,10 @@ const {
 const GIT_BLOB_SCHEME = "worktree-review";
 const MAX_GIT_BUFFER = 20 * 1024 * 1024;
 const MODE_KEY = "worktreeReview.mode";
+const SECONDARY_SIDEBAR_UNSUPPORTED_CONTEXT =
+  "worktreeReview.doesNotSupportSecondarySidebar";
+const DIFF_VIEW_CONTAINER_ID = "worktreeReviewSecondaryDiff";
+const DIFF_VIEW_ID = "worktreeReview.secondaryDiff";
 const MODES = {
   off: {
     label: "Off",
@@ -32,6 +36,11 @@ const MODES = {
     description: "Explorer opens base vs worktree diffs",
     icon: "diff",
   },
+  panel: {
+    label: "Side Panel",
+    description: "Explorer updates the Worktree Review diff panel",
+    icon: "layout-sidebar-right",
+  },
   preview: {
     label: "Preview",
     description: "Explorer opens real worktree files",
@@ -42,14 +51,22 @@ const MODES = {
 function activate(context) {
   const git = new Git();
   const provider = new WorktreeReviewProvider(git, context);
+  const diffPanel = new WorktreeDiffPanelProvider(git);
   const decorations = new ExplorerDecorationProvider(provider);
   const statusBar = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Left,
     100
   );
 
+  provider.setDiffPanel(diffPanel);
   provider.setDecorationProvider(decorations);
   provider.setStatusBar(statusBar);
+
+  vscode.commands.executeCommand(
+    "setContext",
+    SECONDARY_SIDEBAR_UNSUPPORTED_CONTEXT,
+    false
+  );
 
   context.subscriptions.push(
     vscode.workspace.registerTextDocumentContentProvider(
@@ -61,7 +78,13 @@ function activate(context) {
       treeDataProvider: provider,
       showCollapseAll: false,
     }),
+    vscode.window.registerWebviewViewProvider(DIFF_VIEW_ID, diffPanel, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
     statusBar,
+    vscode.workspace.onDidOpenTextDocument((document) =>
+      provider.handleOpenedDocument(document)
+    ),
     vscode.window.onDidChangeActiveTextEditor((editor) =>
       provider.handleActiveEditor(editor)
     ),
@@ -81,12 +104,19 @@ function activate(context) {
     vscode.commands.registerCommand("worktreeReview.openChangedFile", () =>
       provider.openChangedFileQuickPick()
     ),
+    vscode.commands.registerCommand("worktreeReview.focusDiffPanel", () =>
+      provider.focusDiffPanel()
+    ),
     vscode.commands.registerCommand("worktreeReview.copyWorktreePath", (node) =>
       provider.copyWorktreePath(node)
     )
   );
 
   provider.updateStatusBar();
+
+  if (provider.mode === "panel") {
+    setTimeout(() => provider.focusDiffPanel(), 0);
+  }
 }
 
 function deactivate() {}
@@ -132,6 +162,22 @@ class GitBlobContentProvider {
       return "";
     }
 
+    if (payload.worktreePath) {
+      const filePath = path.join(
+        payload.worktreePath,
+        ...payload.filePath.split("/")
+      );
+      if (fs.existsSync(filePath)) {
+        return fs.promises.readFile(filePath, "utf8");
+      }
+
+      return this.git.run(
+        payload.worktreePath,
+        ["show", `${payload.ref}:${payload.filePath}`],
+        { trim: false }
+      );
+    }
+
     return this.git.run(
       payload.repoRoot,
       ["show", `${payload.ref}:${payload.filePath}`],
@@ -156,6 +202,291 @@ class ExplorerDecorationProvider {
   }
 }
 
+class WorktreeDiffPanelProvider {
+  constructor(git) {
+    this.git = git;
+    this.view = undefined;
+    this.sequence = 0;
+    this.state = {
+      kind: "empty",
+      title: "No diff selected",
+      detail: "Select a changed file while Side Panel mode is active.",
+    };
+  }
+
+  resolveWebviewView(view) {
+    this.view = view;
+    view.webview.options = { enableScripts: false };
+    this.render();
+  }
+
+  async focus() {
+    try {
+      await vscode.commands.executeCommand(
+        `workbench.view.extension.${DIFF_VIEW_CONTAINER_ID}`
+      );
+    } catch {
+      // Some VS Code builds do not expose generated commands for contributed containers.
+    }
+
+    try {
+      await vscode.commands.executeCommand(`${DIFF_VIEW_ID}.focus`);
+    } catch {
+      // Older VS Code builds may not expose a generated focus command for the view.
+    }
+  }
+
+  clear() {
+    this.sequence += 1;
+    this.state = {
+      kind: "empty",
+      title: "No diff",
+      detail: "The selected file has no changes in the active worktree.",
+    };
+    this.render();
+  }
+
+  reset() {
+    this.sequence += 1;
+    this.state = {
+      kind: "empty",
+      title: "No diff selected",
+      detail: "Select a changed file while Side Panel mode is active.",
+    };
+    this.render();
+  }
+
+  async hide() {
+    this.reset();
+    if (!this.view || !this.view.visible) {
+      return;
+    }
+
+    const closed = await executeCommandBestEffort(
+      "workbench.action.closeAuxiliaryBar"
+    );
+    if (!closed) {
+      await executeCommandBestEffort("workbench.action.toggleAuxiliaryBar");
+    }
+  }
+
+  async showTarget(target, options = {}) {
+    if (options.reveal) {
+      await this.focus();
+    }
+
+    const sequence = ++this.sequence;
+    this.state = {
+      kind: "loading",
+      title: target.file.path,
+      detail: `${target.repo.baseRef}...${target.worktree.label}`,
+    };
+    this.render();
+
+    try {
+      const patch = await this.buildPatch(target);
+      if (sequence !== this.sequence) {
+        return;
+      }
+
+      this.state = {
+        kind: "diff",
+        target,
+        patch,
+        title: target.file.path,
+        detail: `${target.repo.baseRef}...${target.worktree.label}`,
+      };
+      this.render();
+    } catch (error) {
+      if (sequence !== this.sequence) {
+        return;
+      }
+
+      this.state = {
+        kind: "error",
+        title: target.file.path,
+        detail: formatError(error),
+      };
+      this.render();
+    }
+  }
+
+  async buildPatch(target) {
+    const { file, worktree } = target;
+    const compareBaseRef = file.compareBaseRef || worktree.repo.baseRef;
+    const args = [
+      "diff",
+      "--no-color",
+      "--find-renames",
+      "--unified=80",
+      compareBaseRef,
+      "--",
+    ];
+
+    if (file.oldPath) {
+      args.push(file.oldPath);
+    }
+    args.push(file.path);
+
+    const patch = await this.git.run(worktree.path, args, {
+      trim: false,
+      maxBuffer: MAX_GIT_BUFFER,
+    });
+    if (patch.trim()) {
+      return patch;
+    }
+
+    if (file.statusKind === "A") {
+      return makeSyntheticPatch("added", worktree.path, file.path);
+    }
+
+    if (file.statusKind === "D") {
+      const content = await this.git.run(
+        worktree.repo.repoRoot,
+        ["show", `${compareBaseRef}:${file.oldPath || file.path}`],
+        { trim: false, maxBuffer: MAX_GIT_BUFFER }
+      );
+      return makeSyntheticPatchFromContent("deleted", file.oldPath || file.path, content);
+    }
+
+    return `No textual diff for ${file.path}\n`;
+  }
+
+  render() {
+    if (!this.view) {
+      return;
+    }
+
+    this.view.webview.html = this.renderHtml(this.view.webview);
+  }
+
+  renderHtml(webview) {
+    const state = this.state;
+    const editorStyle = getEditorStyle();
+    const status =
+      state.kind === "diff" && state.target
+        ? statusInfo(state.target.file.statusKind)
+        : undefined;
+    const badge = status ? `<span class="badge">${escapeHtml(status.badge)}</span>` : "";
+    const body =
+      state.kind === "diff"
+        ? `<div class="diff">${renderPatchHtml(state.patch)}</div>`
+        : `<div class="message ${state.kind}">${escapeHtml(state.detail)}</div>`;
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline';">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    :root {
+      --wtr-editor-font-family: ${editorStyle.fontFamily};
+      --wtr-editor-font-size: ${editorStyle.fontSize}px;
+      --wtr-editor-font-weight: ${editorStyle.fontWeight};
+      --wtr-editor-line-height: ${editorStyle.lineHeight}px;
+      --wtr-editor-tab-size: ${editorStyle.tabSize};
+    }
+    body {
+      margin: 0;
+      padding: 0;
+      color: var(--vscode-foreground);
+      background: var(--vscode-editor-background);
+      font-family: var(--vscode-font-family);
+    }
+    .header {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--vscode-sideBarSectionHeader-border);
+      background: var(--vscode-sideBar-background);
+    }
+    .title {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      min-width: 0;
+      font-weight: 600;
+      word-break: break-word;
+    }
+    .badge {
+      flex: 0 0 auto;
+      min-width: 1.4em;
+      padding: 0 4px;
+      border-radius: 3px;
+      color: var(--vscode-badge-foreground);
+      background: var(--vscode-badge-background);
+      text-align: center;
+      font-size: 11px;
+      line-height: 16px;
+    }
+    .detail {
+      margin-top: 3px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+      word-break: break-word;
+    }
+    .message {
+      padding: 12px 10px;
+      color: var(--vscode-descriptionForeground);
+      line-height: 1.5;
+    }
+    .message.error {
+      color: var(--vscode-errorForeground);
+    }
+    .diff {
+      padding: 6px 0 20px;
+      overflow-x: auto;
+      color: var(--vscode-editor-foreground);
+      background: var(--vscode-editor-background);
+      font-family: var(--vscode-editor-font-family, var(--wtr-editor-font-family));
+      font-size: var(--vscode-editor-font-size, var(--wtr-editor-font-size));
+      font-weight: var(--wtr-editor-font-weight);
+      line-height: var(--wtr-editor-line-height);
+    }
+    .line {
+      padding: 0 10px;
+      min-height: var(--wtr-editor-line-height);
+      white-space: pre;
+      tab-size: var(--wtr-editor-tab-size);
+    }
+    .line.header {
+      position: static;
+      border: 0;
+      color: var(--vscode-textLink-foreground);
+      background: var(--vscode-editor-background);
+    }
+    .line.file {
+      color: var(--vscode-descriptionForeground);
+      background: var(--vscode-editor-background);
+    }
+    .line.hunk {
+      color: var(--vscode-editorLineNumber-activeForeground);
+      background: var(--vscode-editor-selectionBackground);
+    }
+    .line.add {
+      background: var(--vscode-diffEditor-insertedLineBackground);
+    }
+    .line.del {
+      background: var(--vscode-diffEditor-removedLineBackground);
+    }
+    .line.context {
+      color: var(--vscode-editor-foreground);
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="title">${badge}<span>${escapeHtml(state.title)}</span></div>
+    <div class="detail">${escapeHtml(state.detail)}</div>
+  </div>
+  ${body}
+</body>
+</html>`;
+  }
+}
+
 class WorktreeReviewProvider {
   constructor(git, context) {
     this.git = git;
@@ -172,6 +503,10 @@ class WorktreeReviewProvider {
 
   setDecorationProvider(provider) {
     this.decorationProvider = provider;
+  }
+
+  setDiffPanel(provider) {
+    this.diffPanel = provider;
   }
 
   setStatusBar(statusBar) {
@@ -383,8 +718,25 @@ class WorktreeReviewProvider {
 
     this.mode = mode;
     await this.context.workspaceState.update(MODE_KEY, mode);
+    if (mode === "off") {
+      await this.resetReviewState();
+    } else if (mode === "panel") {
+      await this.closeWorktreeReviewDiffs();
+      await this.focusDiffPanel();
+    }
     this._onDidChangeTreeData.fire();
+    this.decorationProvider && this.decorationProvider.refresh();
     this.updateStatusBar();
+  }
+
+  async resetReviewState() {
+    this.openingReview = false;
+    await this.closeWorktreeReviewDiffs();
+    if (this.diffPanel) {
+      await this.diffPanel.hide();
+    }
+    this.activeWorktrees.clear();
+    this.changeStates.clear();
   }
 
   async rebuildChangeState(worktree) {
@@ -574,24 +926,52 @@ class WorktreeReviewProvider {
       return;
     }
 
+    if (this.isActiveWorktreeReviewDiffDocument(document.uri)) {
+      return;
+    }
+
     const match = this.findChangeForUri(document.uri);
     if (!match) {
+      if (this.isUriInReviewRoots(document.uri)) {
+        if (this.mode === "panel") {
+          this.diffPanel && this.diffPanel.clear();
+        }
+      }
+
+      return;
+    }
+
+    if (this.mode === "panel") {
+      await this.openPanelForTarget(match, { reveal: false });
       return;
     }
 
     this.openingReview = true;
     try {
-      if (!document.isDirty) {
-        await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
-      }
-
-      await this.openReviewTarget(match, { fromExplorer: true });
+      await this.openReviewTarget(match, { fromExplorer: true, preview: true });
     } catch (error) {
       vscode.window.showWarningMessage(`Worktree Review open failed: ${formatError(error)}`);
     } finally {
       setTimeout(() => {
         this.openingReview = false;
       }, 100);
+    }
+  }
+
+  async handleOpenedDocument(document) {
+    if (this.mode !== "diff" || !document || document.uri.scheme !== "file") {
+      return;
+    }
+
+    const match = this.findChangeForUri(document.uri);
+    if (!match) {
+      return;
+    }
+
+    try {
+      await this.openReviewTarget(match, { fromExplorer: true, preview: true });
+    } catch {
+      // The active-editor handler will report errors if the fallback path also fails.
     }
   }
 
@@ -652,7 +1032,12 @@ class WorktreeReviewProvider {
     });
   }
 
-  async openReviewTarget(target) {
+  async openReviewTarget(target, options = {}) {
+    if (this.mode === "panel") {
+      await this.openPanelForTarget(target, { reveal: true });
+      return;
+    }
+
     if (this.mode === "preview") {
       const opened = await this.openPreviewForFile(target.worktree, target.file);
       if (opened) {
@@ -660,7 +1045,21 @@ class WorktreeReviewProvider {
       }
     }
 
-    await this.openDiffForFile(target.worktree, target.file);
+    await this.openDiffForFile(target.worktree, target.file, options);
+  }
+
+  async openPanelForTarget(target, options = {}) {
+    if (!this.diffPanel) {
+      return;
+    }
+
+    await this.diffPanel.showTarget(target, options);
+  }
+
+  async focusDiffPanel() {
+    if (this.diffPanel) {
+      await this.diffPanel.focus();
+    }
   }
 
   async openPreviewForFile(worktree, file) {
@@ -679,7 +1078,7 @@ class WorktreeReviewProvider {
     return true;
   }
 
-  async openDiffForFile(worktree, file) {
+  async openDiffForFile(worktree, file, options = {}) {
     const leftPath = file.oldPath || file.path;
     const rightPath = file.path;
     const leftUri =
@@ -689,13 +1088,43 @@ class WorktreeReviewProvider {
     const rightUri =
       file.statusKind === "D"
         ? makeEmptyUri(worktree.repo.repoRoot, worktree.headRef, rightPath)
-        : this.getWorktreeFileUri(worktree, rightPath) ||
-          makeGitBlobUri(worktree.repo.repoRoot, worktree.headRef, rightPath);
+        : makeWorktreeFileUri(worktree, rightPath);
     const title = `${statusInfo(file.statusKind).badge} ${rightPath} (${worktree.repo.baseRef}...${worktree.label})`;
 
     await vscode.commands.executeCommand("vscode.diff", leftUri, rightUri, title, {
-      preview: false,
+      preview: options.preview === true,
     });
+  }
+
+  isActiveWorktreeReviewDiffDocument(uri) {
+    const tabGroups = vscode.window.tabGroups;
+    const activeTab = tabGroups && tabGroups.activeTabGroup.activeTab;
+    if (!isWorktreeReviewDiffTab(activeTab)) {
+      return false;
+    }
+
+    const input = activeTab.input;
+    return uriEquals(input.original, uri) || uriEquals(input.modified, uri);
+  }
+
+  async closeWorktreeReviewDiffs() {
+    const tabGroups = vscode.window.tabGroups;
+    if (!tabGroups || typeof tabGroups.close !== "function") {
+      return;
+    }
+
+    const tabs = [];
+    for (const group of tabGroups.all) {
+      for (const tab of group.tabs) {
+        if (isWorktreeReviewDiffTab(tab)) {
+          tabs.push(tab);
+        }
+      }
+    }
+
+    if (tabs.length > 0) {
+      await tabGroups.close(tabs, true);
+    }
   }
 
   getWorktreeFileUri(worktree, relativePath) {
@@ -709,40 +1138,76 @@ class WorktreeReviewProvider {
 
   findChangeForUri(uri) {
     for (const state of this.changeStates.values()) {
-      const relativePath = relativePathFromRoot(state.repo.repoRoot, uri.fsPath);
-      if (!relativePath) {
-        continue;
-      }
-
-      const file =
-        state.index.byPath.get(relativePath) ||
-        state.index.byOldPath.get(relativePath);
-      if (file) {
-        return {
-          state,
-          repo: state.repo,
-          worktree: state.worktree,
-          relativePath,
-          file,
-        };
+      const repoMatch = this.findChangeInState(state, state.repo.repoRoot, uri.fsPath);
+      if (repoMatch) {
+        return repoMatch;
       }
     }
 
     return undefined;
   }
 
+  isUriInReviewRoots(uri) {
+    if (uri.scheme !== "file") {
+      return false;
+    }
+
+    for (const state of this.changeStates.values()) {
+      if (relativePathFromRoot(state.repo.repoRoot, uri.fsPath)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  findChangeInState(state, rootPath, fsPath) {
+    const relativePath = relativePathFromRoot(rootPath, fsPath);
+    if (!relativePath) {
+      return undefined;
+    }
+
+    const file =
+      state.index.byPath.get(relativePath) ||
+      state.index.byOldPath.get(relativePath);
+    if (!file) {
+      return undefined;
+    }
+
+    return {
+      state,
+      repo: state.repo,
+      worktree: state.worktree,
+      relativePath,
+      file,
+    };
+  }
+
   findChangedFolderForUri(uri) {
     for (const state of this.changeStates.values()) {
-      const relativePath = relativePathFromRoot(state.repo.repoRoot, uri.fsPath);
-      if (relativePath && state.index.folders.has(relativePath)) {
-        return {
-          state,
-          relativePath,
-        };
+      const repoMatch = this.findChangedFolderInState(
+        state,
+        state.repo.repoRoot,
+        uri.fsPath
+      );
+      if (repoMatch) {
+        return repoMatch;
       }
     }
 
     return undefined;
+  }
+
+  findChangedFolderInState(state, rootPath, fsPath) {
+    const relativePath = relativePathFromRoot(rootPath, fsPath);
+    if (!relativePath || !state.index.folders.has(relativePath)) {
+      return undefined;
+    }
+
+    return {
+      state,
+      relativePath,
+    };
   }
 
   async copyWorktreePath(node) {
@@ -894,8 +1359,164 @@ function formatStats(stats) {
     .join(" ");
 }
 
+function getEditorStyle() {
+  const config = vscode.workspace.getConfiguration("editor");
+  const fontSize = numberSetting(config.get("fontSize"), 14);
+  const configuredLineHeight = numberSetting(config.get("lineHeight"), 0);
+  const lineHeight =
+    configuredLineHeight > 0 ? configuredLineHeight : Math.round(fontSize * 1.5);
+
+  return {
+    fontFamily: cssFontFamily(config.get("fontFamily", "monospace")),
+    fontSize,
+    fontWeight: cssIdentifier(config.get("fontWeight", "normal")),
+    lineHeight,
+    tabSize: numberSetting(config.get("tabSize"), 4),
+  };
+}
+
+function numberSetting(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+function cssFontFamily(value) {
+  return String(value || "monospace")
+    .split(",")
+    .map((part) => {
+      const trimmed = part.trim();
+      if (!trimmed) {
+        return "monospace";
+      }
+
+      if (
+        (trimmed.startsWith("'") && trimmed.endsWith("'")) ||
+        (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+        /^[a-zA-Z-]+$/.test(trimmed)
+      ) {
+        return trimmed;
+      }
+
+      return `"${trimmed.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+    })
+    .join(", ");
+}
+
+function cssIdentifier(value) {
+  const text = String(value || "normal").trim();
+  return /^[a-zA-Z0-9 _.-]+$/.test(text) ? text : "normal";
+}
+
+async function makeSyntheticPatch(kind, rootPath, filePath) {
+  const absolutePath = path.join(rootPath, ...filePath.split("/"));
+  const content = await fs.promises.readFile(absolutePath, "utf8");
+  return makeSyntheticPatchFromContent(kind, filePath, content);
+}
+
+function makeSyntheticPatchFromContent(kind, filePath, content) {
+  const lines = splitTextLines(content);
+  const lineCount = Math.max(lines.length, 1);
+  const header =
+    kind === "deleted"
+      ? [
+          `diff --git a/${filePath} b/${filePath}`,
+          `deleted file ${filePath}`,
+          `--- a/${filePath}`,
+          "+++ /dev/null",
+          `@@ -1,${lineCount} +0,0 @@`,
+        ]
+      : [
+          `diff --git a/${filePath} b/${filePath}`,
+          `new file ${filePath}`,
+          "--- /dev/null",
+          `+++ b/${filePath}`,
+          `@@ -0,0 +1,${lineCount} @@`,
+        ];
+  const prefix = kind === "deleted" ? "-" : "+";
+  return [...header, ...lines.map((line) => `${prefix}${line}`)].join("\n");
+}
+
+function splitTextLines(content) {
+  const normalized = content.replace(/\r\n/g, "\n");
+  if (!normalized) {
+    return [];
+  }
+
+  return normalized.endsWith("\n")
+    ? normalized.slice(0, -1).split("\n")
+    : normalized.split("\n");
+}
+
+function renderPatchHtml(patch) {
+  return String(patch)
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => `<div class="line ${patchLineClass(line)}">${escapeHtml(line || " ")}</div>`)
+    .join("");
+}
+
+function patchLineClass(line) {
+  if (line.startsWith("diff --git") || line.startsWith("index ")) {
+    return "header";
+  }
+  if (line.startsWith("--- ") || line.startsWith("+++ ")) {
+    return "file";
+  }
+  if (line.startsWith("@@")) {
+    return "hunk";
+  }
+  if (line.startsWith("+")) {
+    return "add";
+  }
+  if (line.startsWith("-")) {
+    return "del";
+  }
+  return "context";
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function isWorktreeReviewDiffTab(tab) {
+  const input = tab && tab.input;
+  return Boolean(
+    input &&
+      input.original &&
+      input.modified &&
+      (input.original.scheme === GIT_BLOB_SCHEME ||
+        input.modified.scheme === GIT_BLOB_SCHEME)
+  );
+}
+
+function uriEquals(left, right) {
+  return Boolean(left && right && left.toString() === right.toString());
+}
+
+async function executeCommandBestEffort(command) {
+  try {
+    await vscode.commands.executeCommand(command);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function makeGitBlobUri(repoRoot, ref, filePath) {
   return makeReviewUri({ repoRoot, ref, filePath, empty: false });
+}
+
+function makeWorktreeFileUri(worktree, filePath) {
+  return makeReviewUri({
+    worktreePath: worktree.path,
+    ref: worktree.headRef,
+    filePath,
+    empty: false,
+  });
 }
 
 function makeEmptyUri(repoRoot, ref, filePath) {

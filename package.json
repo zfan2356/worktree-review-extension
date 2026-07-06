@@ -8,6 +8,9 @@
   "engines": {
     "vscode": "^1.90.0"
   },
+  "extensionKind": [
+    "workspace"
+  ],
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": true,
@@ -21,12 +24,14 @@
   "activationEvents": [
     "onStartupFinished",
     "onView:worktreeReview.worktrees",
+    "onView:worktreeReview.secondaryDiff",
     "onCommand:worktreeReview.refresh",
     "onCommand:worktreeReview.selectBaseRef",
     "onCommand:worktreeReview.selectWorktree",
     "onCommand:worktreeReview.selectMode",
     "onCommand:worktreeReview.openCurrentFileReview",
     "onCommand:worktreeReview.openChangedFile",
+    "onCommand:worktreeReview.focusDiffPanel",
     "onCommand:worktreeReview.copyWorktreePath"
   ],
   "contributes": {
@@ -83,6 +88,12 @@
         "icon": "$(list-selection)"
       },
       {
+        "command": "worktreeReview.focusDiffPanel",
+        "title": "Focus Diff Panel",
+        "category": "Worktree Review",
+        "icon": "$(layout-sidebar-right)"
+      },
+      {
         "command": "worktreeReview.copyWorktreePath",
         "title": "Copy Worktree Path",
         "category": "Worktree Review",
@@ -96,6 +107,14 @@
           "title": "Worktree Review",
           "icon": "resources/worktree-review.svg"
         }
+      ],
+      "secondarySidebar": [
+        {
+          "id": "worktreeReviewSecondaryDiff",
+          "title": "Worktree Review Diff",
+          "icon": "resources/worktree-review.svg",
+          "when": "!worktreeReview.doesNotSupportSecondarySidebar"
+        }
       ]
     },
     "views": {
@@ -103,6 +122,14 @@
         {
           "id": "worktreeReview.worktrees",
           "name": "Worktrees"
+        }
+      ],
+      "worktreeReviewSecondaryDiff": [
+        {
+          "id": "worktreeReview.secondaryDiff",
+          "type": "webview",
+          "name": "Diff",
+          "when": "!worktreeReview.doesNotSupportSecondarySidebar"
         }
       ]
     },
@@ -125,6 +152,11 @@
         },
         {
           "command": "worktreeReview.openChangedFile",
+          "when": "view == worktreeReview.worktrees",
+          "group": "navigation"
+        },
+        {
+          "command": "worktreeReview.focusDiffPanel",
           "when": "view == worktreeReview.worktrees",
           "group": "navigation"
         }
