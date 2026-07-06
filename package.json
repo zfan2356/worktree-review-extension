@@ -23,8 +23,8 @@
   "main": "./src/extension.js",
   "activationEvents": [
     "onStartupFinished",
-    "onView:worktreeReview.changes",
-    "onView:worktreeReview.worktrees",
+    "onView:worktreeReview.sidebar.changes",
+    "onView:worktreeReview.sidebar.worktrees",
     "onView:worktreeReview.secondaryDiff",
     "onCommand:worktreeReview.refresh",
     "onCommand:worktreeReview.selectBaseRef",
@@ -32,6 +32,7 @@
     "onCommand:worktreeReview.selectMode",
     "onCommand:worktreeReview.openCurrentFileReview",
     "onCommand:worktreeReview.openChangedFile",
+    "onCommand:worktreeReview.focusReview",
     "onCommand:worktreeReview.focusDiffPanel",
     "onCommand:worktreeReview.copyWorktreePath"
   ],
@@ -89,6 +90,12 @@
         "icon": "$(list-selection)"
       },
       {
+        "command": "worktreeReview.focusReview",
+        "title": "Open Worktree Review",
+        "category": "Worktree Review",
+        "icon": "$(git-branch)"
+      },
+      {
         "command": "worktreeReview.focusDiffPanel",
         "title": "Focus Diff Panel",
         "category": "Worktree Review",
@@ -119,16 +126,13 @@
       ]
     },
     "views": {
-      "explorer": [
-        {
-          "id": "worktreeReview.changes",
-          "name": "Worktree Review: Changes",
-          "visibility": "visible"
-        }
-      ],
       "worktreeReview": [
         {
-          "id": "worktreeReview.worktrees",
+          "id": "worktreeReview.sidebar.changes",
+          "name": "Changes"
+        },
+        {
+          "id": "worktreeReview.sidebar.worktrees",
           "name": "Worktrees"
         }
       ],
@@ -145,54 +149,61 @@
       "view/title": [
         {
           "command": "worktreeReview.refresh",
-          "when": "view == worktreeReview.changes",
+          "when": "view == worktreeReview.sidebar.changes",
           "group": "navigation"
         },
         {
           "command": "worktreeReview.openChangedFile",
-          "when": "view == worktreeReview.changes",
+          "when": "view == worktreeReview.sidebar.changes",
           "group": "navigation"
         },
         {
           "command": "worktreeReview.refresh",
-          "when": "view == worktreeReview.worktrees",
+          "when": "view == worktreeReview.sidebar.worktrees",
           "group": "navigation"
         },
         {
           "command": "worktreeReview.selectBaseRef",
-          "when": "view == worktreeReview.worktrees",
+          "when": "view == worktreeReview.sidebar.worktrees",
           "group": "navigation"
         },
         {
           "command": "worktreeReview.selectMode",
-          "when": "view == worktreeReview.worktrees",
+          "when": "view == worktreeReview.sidebar.worktrees",
           "group": "navigation"
         },
         {
           "command": "worktreeReview.openChangedFile",
-          "when": "view == worktreeReview.worktrees",
+          "when": "view == worktreeReview.sidebar.worktrees",
           "group": "navigation"
         },
         {
           "command": "worktreeReview.focusDiffPanel",
-          "when": "view == worktreeReview.worktrees",
+          "when": "view == worktreeReview.sidebar.worktrees",
           "group": "navigation"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "worktreeReview.focusReview",
+          "when": "resourceScheme == file",
+          "group": "navigation@99"
         }
       ],
       "view/item/context": [
         {
           "command": "worktreeReview.selectBaseRef",
-          "when": "view == worktreeReview.worktrees && viewItem == repo",
+          "when": "view == worktreeReview.sidebar.worktrees && viewItem == repo",
           "group": "navigation"
         },
         {
           "command": "worktreeReview.selectWorktree",
-          "when": "view == worktreeReview.worktrees && (viewItem == worktree || viewItem == worktreeActive)",
+          "when": "view == worktreeReview.sidebar.worktrees && (viewItem == worktree || viewItem == worktreeActive)",
           "group": "inline"
         },
         {
           "command": "worktreeReview.copyWorktreePath",
-          "when": "view == worktreeReview.worktrees && (viewItem == worktree || viewItem == worktreeActive)",
+          "when": "view == worktreeReview.sidebar.worktrees && (viewItem == worktree || viewItem == worktreeActive)",
           "group": "navigation"
         }
       ],

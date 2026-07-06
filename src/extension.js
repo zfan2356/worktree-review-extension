@@ -23,6 +23,9 @@ const MAX_GIT_BUFFER = 20 * 1024 * 1024;
 const MODE_KEY = "worktreeReview.mode";
 const SECONDARY_SIDEBAR_UNSUPPORTED_CONTEXT =
   "worktreeReview.doesNotSupportSecondarySidebar";
+const REVIEW_VIEW_CONTAINER_ID = "worktreeReview";
+const CHANGES_VIEW_ID = "worktreeReview.sidebar.changes";
+const WORKTREES_VIEW_ID = "worktreeReview.sidebar.worktrees";
 const DIFF_VIEW_CONTAINER_ID = "worktreeReviewSecondaryDiff";
 const DIFF_VIEW_ID = "worktreeReview.secondaryDiff";
 const MODES = {
@@ -64,11 +67,11 @@ function activate(context) {
   provider.setChangesProvider(changes);
   provider.setStatusBar(statusBar);
 
-  const treeView = vscode.window.createTreeView("worktreeReview.worktrees", {
+  const treeView = vscode.window.createTreeView(WORKTREES_VIEW_ID, {
     treeDataProvider: provider,
     showCollapseAll: false,
   });
-  const changesTreeView = vscode.window.createTreeView("worktreeReview.changes", {
+  const changesTreeView = vscode.window.createTreeView(CHANGES_VIEW_ID, {
     treeDataProvider: changes,
     showCollapseAll: true,
   });
@@ -118,6 +121,9 @@ function activate(context) {
     ),
     vscode.commands.registerCommand("worktreeReview.openChangedFile", (node) =>
       provider.openChangedFile(node)
+    ),
+    vscode.commands.registerCommand("worktreeReview.focusReview", () =>
+      provider.focusReview()
     ),
     vscode.commands.registerCommand("worktreeReview.focusDiffPanel", () =>
       provider.focusDiffPanel()
@@ -1182,6 +1188,16 @@ class WorktreeReviewProvider {
   async focusDiffPanel() {
     if (this.diffPanel) {
       await this.diffPanel.focus();
+    }
+  }
+
+  async focusReview() {
+    await executeCommandBestEffort(
+      `workbench.view.extension.${REVIEW_VIEW_CONTAINER_ID}`
+    );
+    const focusedChanges = await executeCommandBestEffort(`${CHANGES_VIEW_ID}.focus`);
+    if (!focusedChanges) {
+      await executeCommandBestEffort(`${WORKTREES_VIEW_ID}.focus`);
     }
   }
 
