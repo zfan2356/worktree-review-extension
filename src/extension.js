@@ -17,15 +17,17 @@ const {
   statusInfo,
   trimTrailingNewline,
 } = require("./git-utils");
+const {
+  REVIEW_VIEW_CONTAINER_ID,
+  getChangesViewIds,
+  getWorktreesViewIds,
+} = require("./view-ids");
 
 const GIT_BLOB_SCHEME = "worktree-review";
 const MAX_GIT_BUFFER = 20 * 1024 * 1024;
 const MODE_KEY = "worktreeReview.mode";
 const SECONDARY_SIDEBAR_UNSUPPORTED_CONTEXT =
   "worktreeReview.doesNotSupportSecondarySidebar";
-const REVIEW_VIEW_CONTAINER_ID = "worktreeReview";
-const CHANGES_VIEW_ID = "worktreeReview.sidebar.changes";
-const WORKTREES_VIEW_ID = "worktreeReview.sidebar.worktrees";
 const DIFF_VIEW_CONTAINER_ID = "worktreeReviewSecondaryDiff";
 const DIFF_VIEW_ID = "worktreeReview.secondaryDiff";
 const MODES = {
@@ -67,13 +69,17 @@ function activate(context) {
   provider.setChangesProvider(changes);
   provider.setStatusBar(statusBar);
 
-  const treeView = vscode.window.createTreeView(WORKTREES_VIEW_ID, {
+  const worktreesRegistration = createTreeViewWithFallback(getWorktreesViewIds(), {
     treeDataProvider: provider,
     showCollapseAll: false,
   });
-  const changesTreeView = vscode.window.createTreeView(CHANGES_VIEW_ID, {
+  const changesRegistration = createTreeViewWithFallback(getChangesViewIds(), {
     treeDataProvider: changes,
     showCollapseAll: true,
+  });
+  provider.setViewIds({
+    changes: changesRegistration.viewId,
+    worktrees: worktreesRegistration.viewId,
   });
 
   vscode.commands.executeCommand(
@@ -88,12 +94,12 @@ function activate(context) {
       new GitBlobContentProvider(git)
     ),
     vscode.window.registerFileDecorationProvider(decorations),
-    changesTreeView,
-    changesTreeView.onDidChangeSelection((event) =>
+    changesRegistration.treeView,
+    changesRegistration.treeView.onDidChangeSelection((event) =>
       changes.handleTreeSelection(event.selection[0])
     ),
-    treeView,
-    treeView.onDidChangeSelection((event) =>
+    worktreesRegistration.treeView,
+    worktreesRegistration.treeView.onDidChangeSelection((event) =>
       provider.handleTreeSelection(event.selection[0])
     ),
     vscode.window.registerWebviewViewProvider(DIFF_VIEW_ID, diffPanel, {
@@ -141,6 +147,22 @@ function activate(context) {
 }
 
 function deactivate() {}
+
+function createTreeViewWithFallback(viewIds, options) {
+  const errors = [];
+  for (const viewId of viewIds) {
+    try {
+      return {
+        treeView: vscode.window.createTreeView(viewId, options),
+        viewId,
+      };
+    } catch (error) {
+      errors.push(`${viewId}: ${formatError(error)}`);
+    }
+  }
+
+  throw new Error(`Could not register Worktree Review view. ${errors.join("; ")}`);
+}
 
 class Git {
   run(cwd, args, options = {}) {
@@ -582,6 +604,7 @@ class WorktreeReviewProvider {
     this.repoCache = new Map();
     this.activeWorktrees = new Map();
     this.changeStates = new Map();
+    this.viewIds = {};
     this.openingReview = false;
     this._onDidChangeTreeData = new vscode.EventEmitter();
     this.onDidChangeTreeData = this._onDidChangeTreeData.event;
@@ -597,6 +620,10 @@ class WorktreeReviewProvider {
 
   setChangesProvider(provider) {
     this.changesProvider = provider;
+  }
+
+  setViewIds(viewIds) {
+    this.viewIds = viewIds;
   }
 
   setStatusBar(statusBar) {
@@ -1195,9 +1222,11 @@ class WorktreeReviewProvider {
     await executeCommandBestEffort(
       `workbench.view.extension.${REVIEW_VIEW_CONTAINER_ID}`
     );
-    const focusedChanges = await executeCommandBestEffort(`${CHANGES_VIEW_ID}.focus`);
+    const focusedChanges = await executeCommandBestEffort(
+      `${this.viewIds.changes}.focus`
+    );
     if (!focusedChanges) {
-      await executeCommandBestEffort(`${WORKTREES_VIEW_ID}.focus`);
+      await executeCommandBestEffort(`${this.viewIds.worktrees}.focus`);
     }
   }
 

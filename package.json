@@ -2,7 +2,7 @@
   "name": "worktree-review",
   "displayName": "Worktree Review",
   "description": "Review Git worktree branches from your current repository without switching branches.",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "publisher": "zfan2356",
   "license": "MIT",
   "engines": {
@@ -217,7 +217,7 @@
     }
   },
   "scripts": {
-    "lint": "node --check src/extension.js && node --check src/git-utils.js && node --check test/git-utils.test.js",
+    "lint": "node --check src/extension.js && node --check src/git-utils.js && node --check src/view-ids.js && node --check test/git-utils.test.js && node --check test/manifest.test.js",
     "test": "node --test test/*.test.js",
     "check": "npm run lint && npm test",
     "package:vsix": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-vsix.ps1"
